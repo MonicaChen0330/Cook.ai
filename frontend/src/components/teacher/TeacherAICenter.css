@@ -1,0 +1,64 @@
+/* frontend/src/components/teacher/TeacherAICenter.css */
+.ai-command-center {
+  width: 100%;
+  max-width: 800px; /* 讓內容集中，更易讀 */
+  margin: 4rem auto; /* 上下留白，水平置中 */
+  text-align: center;
+}
+.welcome-message {
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+.sparkle-icon { font-size: 2rem; }
+.welcome-message h2 { margin: 0; }
+
+.prompt-container {
+  position: relative;
+  margin-bottom: 1.5rem;
+}
+.prompt-container input {
+  width: 100%;
+  padding: 1rem 1rem 1rem 3.5rem; /* 左側留出圖示空間 */
+  font-size: 1.1rem;
+  border: 1px solid var(--border-color);
+  border-radius: 50px; /* 圓角膠囊形狀 */
+  box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+  transition: all 0.2s ease;
+}
+.prompt-container input:focus {
+  outline: none;
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 4px rgba(74, 144, 226, 0.2);
+}
+.prompt-icon {
+  position: absolute;
+  left: 1.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-color-muted);
+}
+
+.suggestion-chips {
+  display: flex;
+  justify-content: center;
+  gap: 1rem;
+}
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: var(--card-background);
+  border: 1px solid var(--border-color);
+  padding: 0.6rem 1rem;
+  border-radius: 50px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.chip:hover {
+  background: var(--background-color);
+  border-color: var(--primary-color);
+  color: var(--primary-color);
+}
