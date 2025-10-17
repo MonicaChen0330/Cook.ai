@@ -1,0 +1,55 @@
+/* frontend/src/pages/student/StudentOverview.css */
+
+.student-dashboard {
+  /* max-width: 2280px;
+  margin: 0 auto; */
+  padding: 0 4rem 0 4rem;
+  display: flex;
+  flex-direction: column;
+  /* gap: 2rem; */
+}
+
+.block-title {
+  margin-top: 0;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 1rem;
+  font-size: 1.2rem;
+  color: var(--text-color);
+  margin-top: 2rem; 
+}
+
+.course-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 1.5rem;
+}
+
+.course-card {
+  border: 1px solid var(--border-color);
+  border-radius: var(--border-radius);
+  padding: 1.5rem;
+  transition: all 0.2s ease;
+  text-decoration: none;
+  color: var(--text-color);
+  background-color: var(--card-background);
+}
+
+.course-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 6px 12px rgba(0,0,0,0.08);
+    border-color: var(--primary-color);
+}
+
+.course-card h4 {
+    margin-top: 0;
+    font-size: 1.25rem;
+    color: var(primary-color-hover);
+
+}
+
+.course-card p {
+    font-size: 0.9em;
+    color: var(--text-color-light);
+    margin-bottom: 0;
+}

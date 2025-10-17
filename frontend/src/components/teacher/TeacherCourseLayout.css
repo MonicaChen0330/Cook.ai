@@ -1,0 +1,18 @@
+/* frontend/src/components/teacher/TeacherCourseLayout.css */
+
+.portal-body {
+  display: flex;
+  flex-grow: 1;
+  overflow: hidden;
+}
+
+.portal-content {
+  flex-grow: 1;
+  padding: 2rem;
+  overflow-y: auto;
+
+  /* ✨ 關鍵修正：使用 Flexbox 來讓內容垂直和水平都置中 ✨ */
+  display: flex;
+  justify-content: center; /* 垂直置中 */
+  align-items: center;   /* 水平置中 */
+}

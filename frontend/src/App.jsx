@@ -1,35 +1,38 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
-import './App.css'
+// frontend/src/App.jsx
+import { Routes, Route } from 'react-router-dom';
+import Home from './pages/Home';
+import TeacherPortal from './pages/Teacher';
+import StudentPortal from './pages/Student';
+
+import TeacherOverview from './pages/teacher/TeacherOverview';
+import TeacherCourseLayout from './components/teacher/TeacherCourseLayout';
+import TeacherCourse from './pages/teacher/TeacherCourse';
+
+import StudentOverview from './pages/student/StudentOverview';
+import StudentCourseLayout from './components/student/StudentCourseLayout';
+import StudentCourse from './pages/student/StudentCourse';
 
 function App() {
-  const [count, setCount] = useState(0)
-
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button onClick={() => setCount((count) => count + 1)}>
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.jsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
-  )
+    <Routes>
+      <Route path="/" element={<Home />} />
+      
+      <Route path="/teacher" element={<TeacherPortal />}>
+        <Route index element={<TeacherOverview />} />
+        <Route path="course/:courseId" element={<TeacherCourseLayout />}>
+            <Route index element={<TeacherCourse />} />
+            <Route path="materials" element={<h2>教師教材庫 (待開發)</h2>} />
+        </Route>
+      </Route>
+      
+      <Route path="/student" element={<StudentPortal />}>
+          <Route index element={<StudentOverview />} />
+          <Route path="course/:courseId" element={<StudentCourseLayout />}>
+              <Route index element={<StudentCourse />} />
+          </Route>
+      </Route>
+    </Routes>
+  );
 }
 
-export default App
+export default App;
