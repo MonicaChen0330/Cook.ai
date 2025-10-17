@@ -8,19 +8,18 @@
   --primary-gradient: linear-gradient(90deg, #4343e6 0%, #81C7F5 100%);
 
   /* 文字顏色 */
-  --text-color: #212529; /* 比 #333 更深，對比更清晰 */
+  --text-color: #212529; 
   --text-color-light: #495057;
-  /* ✨ 新增：更淺的輔助文字顏色 */
   --text-color-muted: #6C757D;
 
   /* 背景與邊框 */
   --background-color: #F8F9FA;
   --card-background: #FFFFFF;
-  --border-color: #DEE2E6; /* 比 #E0E0E0 稍深一點 */
+  --border-color: #DEE2E6; 
 
   /* 其他 */
-  --box-shadow: 0 4px 6px rgba(0,0,0,0.05); /* 稍微加深的陰影 */
-  --border-radius: 8px; /* ✨ 新增：圓角變數，讓風格統一 */
+  --box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+  --border-radius: 8px; 
 }
 
 html, body, #root {
@@ -29,11 +28,17 @@ html, body, #root {
   height: 100%;
   width: 100%;
   box-sizing: border-box;
-  font-family: 'Noto Sans TC', system-ui, sans-serif; /* 套用新字體 */
+  font-family: 'Noto Sans TC', system-ui, sans-serif; 
   background-color: var(--background-color);
   color: var(--text-color);
 }
 
+/* Tailwind directives should come after global base styles */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* The rest of the original index.css content that is not covered by Tailwind or variables */
 a {
   font-weight: 500;
   color: #646cff;
@@ -84,7 +89,7 @@ button:focus-visible {
   flex-direction: column
 }
 
-@media (prefers-color-scheme: light) {
+ @media (prefers-color-scheme: light) {
   :root {
     color: #213547;
     background-color: #ffffff;
