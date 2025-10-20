@@ -5,7 +5,10 @@ import {
   FaDatabase,       // 資料庫
   FaClipboardList,  // 任務/管理列表
   FaBullhorn,       // 公告
-  FaChartBar        // 圖表/儀表板
+  FaChartBar,        // 圖表/儀表板
+  FaBook,
+  FaUserSecret,
+  FaCalculator
 } from 'react-icons/fa';
 
 interface TeacherSidebarProps {
@@ -71,6 +74,36 @@ function TeacherSidebar({ courseId }: TeacherSidebarProps) {
                 }
               >
                 <FaChartBar /> 學生儀表板
+              </NavLink>
+            </li>
+            <li>
+              <NavLink 
+                to={`${baseCoursePath}/literature-review`} 
+                className={({ isActive }) =>
+                  `flex items-center gap-3 py-3 px-4 no-underline rounded-md text-gray-600 font-medium transition-all duration-200 ease-in-out ${isActive ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'hover:bg-gray-100 hover:text-blue-500'}`
+                }
+              >
+                <FaBook /> Literature Review
+              </NavLink>
+            </li>
+            <li>
+              <NavLink 
+                to={`${baseCoursePath}/ai-detector`} 
+                className={({ isActive }) =>
+                  `flex items-center gap-3 py-3 px-4 no-underline rounded-md text-gray-600 font-medium transition-all duration-200 ease-in-out ${isActive ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'hover:bg-gray-100 hover:text-blue-500'}`
+                }
+              >
+                <FaUserSecret /> AI Detector
+              </NavLink>
+            </li>
+            <li>
+              <NavLink 
+                to={`${baseCoursePath}/carbon-emission-calculator`} 
+                className={({ isActive }) =>
+                  `flex items-center gap-3 py-3 px-4 no-underline rounded-md text-gray-600 font-medium transition-all duration-200 ease-in-out ${isActive ? 'bg-gradient-to-r from-blue-500 to-purple-600 text-white' : 'hover:bg-gray-100 hover:text-blue-500'}`
+                }
+              >
+                <FaCalculator /> 探排計算指標
               </NavLink>
             </li>
           </ul>
