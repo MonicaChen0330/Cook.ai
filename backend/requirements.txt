@@ -46,3 +46,11 @@ urllib3==2.5.0
 Werkzeug==3.1.3
 xxhash==3.6.0
 zstandard==0.25.0
+python-docx
+python-pptx
+langchain-community
+beautifulsoup4
+requests
+pytesseract
+google-api-python-client
+google-auth-oauthlib

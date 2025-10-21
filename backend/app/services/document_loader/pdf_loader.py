@@ -4,6 +4,7 @@ import base64
 import io
 from PIL import Image
 from . import Document, DocumentLoader
+from .ocr_utils import ocr_image_to_text
 
 class PdfLoader(DocumentLoader):
     """A loader for PDF files that extracts text and converts images to a web-safe format."""
@@ -33,6 +34,11 @@ class PdfLoader(DocumentLoader):
                             with io.BytesIO() as buffer:
                                 pil_image.save(buffer, format="PNG")
                                 png_image_bytes = buffer.getvalue()
+
+                            # Perform OCR on the image
+                            ocr_text = ocr_image_to_text(png_image_bytes)
+                            if ocr_text:
+                                text_parts.append(f"\n[Text from Image {i+1} on page {page_num + 1}]:\n{ocr_text}\n")
 
                             # Encode the PNG bytes in base64
                             base64_image = base64.b64encode(png_image_bytes).decode('utf-8')
