@@ -53,8 +53,11 @@ dist/
 # Never commit secret keys or environment variables.
 # Instead, create a `.env.example` file to show what variables are needed.
 .env
+.env.*
 .env.local
 .env.*.local
+credentials.json
+token.json
 
 # ===================================================================
 # IDE / Editor
