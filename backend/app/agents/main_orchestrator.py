@@ -14,7 +14,8 @@ from .material_generator.graph import app as material_generator_app
 # --- 2. Define the State for the Main Orchestrator ---
 class MainOrchestratorState(TypedDict):
     user_query: str
-    document_path: str
+    # The user session should determine which content is being worked on.
+    unique_content_id: int 
     parsed_task: Dict[str, Any]
     final_result: Any
     error: str | None
@@ -83,9 +84,11 @@ def run_exam_generator_node(state: MainOrchestratorState) -> MainOrchestratorSta
     """Invokes the exam generation sub-graph."""
     print("--- L3 Orchestrator: Invoking Exam Generator Sub-Graph ---")
     task_params = state["parsed_task"].get("parameters", {})
+    
+    # Pass the unique_content_id to the sub-graph instead of the document_path
     sub_graph_input = {
         "query": state["user_query"],
-        "document_path": state["document_path"],
+        "unique_content_id": state["unique_content_id"],
         "question_type": task_params.get("question_type", "multiple_choice")
     }
     print(f"Calling sub-graph with input: {sub_graph_input}")
@@ -159,13 +162,12 @@ main_orchestrator_app = workflow.compile()
 if __name__ == '__main__':
     import os
 
-    PDF_FILE_PATH = "sample.pdf"
-    
-    if not os.path.exists(PDF_FILE_PATH):
-        print(f"Error: Test file not found at '{PDF_FILE_PATH}'. Please run this from the 'backend' directory.")
-        exit()
+    # The user session would determine which content ID is active.
+    # We mock it here for testing.
+    ACTIVE_CONTENT_ID = 456 
 
     print("--- AI 教材小幫手已啟動 ---")
+    print(f"--- 目前針對內容 ID: {ACTIVE_CONTENT_ID} ---")
     print("請輸入您的指令，或輸入 'exit' 來離開。")
     print("範例指令：請幫我出 5 題是非題")
 
@@ -178,7 +180,7 @@ if __name__ == '__main__':
 
         inputs = {
             "user_query": user_query,
-            "document_path": PDF_FILE_PATH,
+            "unique_content_id": ACTIVE_CONTENT_ID,
         }
 
         print("--- ...總協調器執行中... ---")

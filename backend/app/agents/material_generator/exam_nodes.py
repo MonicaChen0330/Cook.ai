@@ -2,7 +2,6 @@ import os
 from openai import OpenAI
 from typing import List
 from .state import ExamGenerationState
-from app.services.document_loader import get_loader
 
 # Initialize the OpenAI client
 try:
@@ -36,27 +35,36 @@ def call_openai_api(prompt: str, images: List[str] = None) -> str:
     return response.choices[0].message.content
 
 
-def read_document_node(state: ExamGenerationState) -> ExamGenerationState:
-    """Reads text and images from the document and puts them into the state."""
-    print("Node: read_document_node")
+def retrieve_chunks_node(state: ExamGenerationState) -> ExamGenerationState:
+    """
+    Retrieves pre-processed text chunks from the database using unique_content_id.
+    This is a mock implementation for now.
+    """
+    print("Node: retrieve_chunks_node")
     try:
-        loader = get_loader(state["document_path"])
-        document = loader.load(state["document_path"])
-        state["document_content"] = document.content
-        state["document_images"] = document.images  # Pass images to state
+        content_id = state["unique_content_id"]
+        print(f"Simulating fetching chunks for unique_content_id: {content_id}")
+        
+        # In a real implementation, you would query the DOCUMENT_CHUNKS table:
+        # from app.database import SessionLocal
+        # from app.models import DocumentChunk
+        # db = SessionLocal()
+        # chunks = db.query(DocumentChunk).filter(DocumentChunk.unique_content_id == content_id).order_by(DocumentChunk.chunk_order).all()
+        # retrieved_content = "\n\n".join([chunk.chunk_text for chunk in chunks])
+        # db.close()
+
+        # Mock content for demonstration purposes
+        mock_content = f"This is the pre-processed and chunked content for document ID {content_id}. " \
+                       "It was retrieved from the database, not from a raw file. " \
+                       "This new process is much more efficient as it avoids re-reading the file."
+        
+        state["retrieved_content"] = mock_content
+        # TODO: Image handling will also need to be adapted to use the database in the future.
+        # For now, we assume no images are retrieved with chunks.
+        state["document_images"] = [] 
         state["error"] = None
-
-        # Debug prints pdf content and images info
-        # print("-" * 20)
-        # print("Document Content Loaded (first 500 chars):")
-        # print(state["document_content"][:500] + "...")
-        # print(f"Found {len(state['document_images'])} images in the document.")
-        # for i, img_data in enumerate(state['document_images']):
-        #     print(f"  - Image {i + 1} data preview: {img_data[:100]}...")
-        # print("-" * 20)
-
     except Exception as e:
-        state["error"] = f"Failed to read document: {str(e)}"
+        state["error"] = f"Failed to retrieve chunks from DB: {str(e)}"
     return state
 
 
@@ -74,8 +82,8 @@ def generate_multiple_choice_node(state: ExamGenerationState) -> ExamGenerationS
 
 **--- INPUTS ---**
 - **User Query:** {state['query']}
-- **Document Content:**
-{state['document_content']}
+- **Retrieved Content:**
+{state['retrieved_content']}
 - **Images:** [Images are provided if available]
 
 **--- OUTPUT FORMAT ---**
@@ -112,8 +120,8 @@ def generate_short_answer_node(state: ExamGenerationState) -> ExamGenerationStat
 
 **--- INPUTS ---**
 - **User Query:** {state['query']}
-- **Document Content:**
-{state['document_content']}
+- **Retrieved Content:**
+{state['retrieved_content']}
 - **Images:** [Images are provided if available]
 
 **--- OUTPUT FORMAT ---**
@@ -146,8 +154,8 @@ def generate_true_false_node(state: ExamGenerationState) -> ExamGenerationState:
 
 **--- INPUTS ---**
 - **User Query:** {state['query']}
-- **Document Content:**
-{state['document_content']}
+- **Retrieved Content:**
+{state['retrieved_content']}
 - **Images:** [Images are provided if available]
 
 **--- OUTPUT FORMAT ---**

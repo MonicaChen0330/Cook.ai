@@ -47,6 +47,7 @@ erDiagram
     }
 
     %% --- 3. 教材上傳與 RAG 處理 ---
+    %% 11/07已建立
     UNIQUE_CONTENTS {
         INTEGER id PK
         VARCHAR(64) content_hash UK "SHA-256 hash of the file content"
@@ -56,6 +57,7 @@ erDiagram
         DATETIME created_at "上傳時間"
     }
     
+    %% 11/07已建立
     MATERIALS {
         INTEGER id PK
         INTEGER course_id FK "FK -> COURSES.id"
@@ -71,14 +73,16 @@ erDiagram
         INTEGER knowledge_point_id PK, FK "-> KNOWLEDGE_POINTS.id"
     }
     
-    MATERIAL_PREVIEWS {
+    %% 11/07已建立
+    DOCUMENT_CONTENT {
         INTEGER id PK
         INTEGER unique_content_id FK "FK -> UNIQUE_CONTENTS.id"
-        INTEGER page_number "在原文件中的頁碼或順序"
-        TEXT extracted_text "該頁的純文字"
-        TEXT ocr_text "該頁的 OCR 文字"
-        VARCHAR(512) preview_image_path "該頁的預覽圖儲存路徑"
+        INTEGER page_number "在原文件中的頁碼"
+        JSON structured_content "儲存圖文混排json格式資料"
+        TEXT combined_human_text "儲存 RAG 用與人類閱讀的純文字
     }
+    
+    %% 11/07已建立
     DOCUMENT_CHUNKS {
         INTEGER id PK
         INTEGER unique_content_id FK "FK -> UNIQUE_CONTENTS.id"
@@ -89,12 +93,15 @@ erDiagram
     }
 
     %% --- 4. AI Agent 生成流程 ---
-    %% 每個Query觸發紀錄一次
+    
+    %% 每個Query觸發記錄一次
+    %% 11/08已建立
     ORCHESTRATION_JOBS {
         INTEGER id PK
         INTEGER user_id FK "Input Query的教師，FK -> USERS.id"
         TEXT input_prompt "教師輸入的Query"
         VARCHAR(50) status "'planning', 'rejected', etc., 'completed'"
+        TEXT error_message "紀錄執行失敗原因"
         INTEGER final_output_id FK "-> GENERATED_CONTENTS.id"
         DATETIME created_at "任務開始時間"
         DATETIME updated_at "任務最後更新時間"
@@ -110,13 +117,16 @@ erDiagram
         INTEGER total_completion_tokens "總輸出 Tokens"
         DECIMAL estimated_carbon_g "預估碳排放 (克)"
     }
+    
+    %% 11/08 已建立
     ORCHESTRATION_JOB_SOURCES {
         INTEGER job_id PK, FK "-> ORCHESTRATION_JOBS.id"
         VARCHAR(20) source_type PK "'content' or 'chunk'"
         INTEGER source_id PK "e.g., unique_content_id or document_chunk_id"
     }
     
-    %% 每個Agent被分派到工作時觸發紀錄一次
+    %% 每個Agent被分派到工作時觸發記錄一次
+    %% 11/08 已建立
     AGENT_TASKS {
         INTEGER id PK
         INTEGER job_id FK "FK -> ORCHESTRATION_JOBS.id"
@@ -144,12 +154,15 @@ erDiagram
         DATETIME created_at "任務建立時間"
         DATETIME completed_at "任務完成時間"
     }
+    
+    %% 11/08 已建立
     AGENT_TASK_SOURCES {
         INTEGER task_id PK, FK "-> AGENT_TASKS.id"
         VARCHAR(20) source_type PK "'content' or 'chunk'"
         INTEGER source_id PK "e.g., unique_content_id or document_chunk_id"
     }
     
+    %% 11/08 已建立
     TASK_EVALUATIONS {
         INTEGER id PK
         INTEGER task_id FK "-> AGENT_TASKS.id"
@@ -166,6 +179,7 @@ erDiagram
         DATETIME evaluated_at "評估時間"
     }
     
+    %% 11/08 已建立
     GENERATED_CONTENTS {
         INTEGER id PK
         INTEGER source_agent_task_id FK "-> AGENT_TASKS.id"
@@ -177,6 +191,7 @@ erDiagram
         DATETIME updated_at
     }
     
+    %% 11/08 已建立 (教師編輯紀錄，是未來HITL可能會開發的功能)
     CONTENT_EDIT_HISTORY {
         INTEGER id PK
         INTEGER generated_content_id FK "-> GENERATED_CONTENTS.id"
@@ -255,14 +270,19 @@ erDiagram
         VARCHAR(50) content_type "內容類型 (e.g., 'material', 'generated', 'assignment')"
         INTEGER content_id "對應到 'material', 'generated_contents' 或 'assignments' 的 ID"
     }
+    
     %% --- 6. 知識地圖 (Knowledge Map) ---
+    
+    %% 11/07已建立
     COURSE_UNITS {
         INTEGER id PK
         INTEGER course_id FK "-> COURSES.id"
-        VARCHAR(255) name "單元名稱 (e.g., 第三章 光合作用)"
+        VARCHAR(255) chapter_name "單元名稱 (e.g., 第三章 光合作用)"
         INTEGER week "周次"
         INTEGER display_order "單元顯示順序for教材管理與顯示"
     }
+    
+    %% 11/07已建立
     KNOWLEDGE_POINTS {
         INTEGER id PK
         INTEGER unit_id FK "-> COURSE_UNITS.id"
@@ -375,6 +395,8 @@ erDiagram
     COURSES ||--o{ ANNOUNCEMENTS : "has"
     COURSES ||--o{ FEEDBACK : "receives"
     COURSES ||--o{ MATERIALS : "has"
+    
+    %% 教材上傳與 RAG 處理
     UNIQUE_CONTENTS ||--|{ MATERIALS : "uploaded as"
     UNIQUE_CONTENTS ||--o{ MATERIAL_PREVIEWS : "has"
     UNIQUE_CONTENTS ||--o{ DOCUMENT_CHUNKS : "has"

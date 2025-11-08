@@ -1,15 +1,34 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Dict, Any, Optional
 import os
 import re
 
 @dataclass
+class ExtractedImage:
+    """A dataclass to hold an image's URI and its OCR'd text."""
+    image_uri: str
+    ocr_text: str
+
+@dataclass
+class Page:
+    """A dataclass to represent a single page of a document, with distinct text and image sources."""
+    page_number: int
+    structured_elements: List[Dict[str, Any]]
+    extracted_images: List[ExtractedImage] = field(default_factory=list)
+
+    generated_text_for_chunking: Optional[str] = field(init=False, default=None)
+
+@dataclass
 class Document:
-    """A dataclass to represent a loaded document, potentially with images."""
-    content: str
+    """A dataclass to represent a loaded document, with page-by-page content."""
     source: str  # e.g., file path or URL
-    images: List[str] = field(default_factory=list) # List of base64 encoded images
+    pages: List[Page] = field(default_factory=list)
+    
+    @property
+    def content(self) -> str:
+        """Returns the full text content by concatenating all pages."""
+        return "\n\n".join([page.text for page in self.pages if page.text])
 
 class DocumentLoader(ABC):
     """Abstract base class for document loaders."""
