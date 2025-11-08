@@ -1,4 +1,4 @@
-from . import Document, DocumentLoader
+from . import Document, Page, ExtractedImage, DocumentLoader
 from pptx import Presentation
 from .image_utils import image_to_base64_uri
 from pptx.enum.shapes import MSO_SHAPE_TYPE
@@ -8,33 +8,40 @@ class PptxLoader(DocumentLoader):
     """A loader for Microsoft PowerPoint (.pptx) files."""
 
     def load(self, source: str) -> Document:
-        """Reads text and extracts images from a .pptx file."""
+        """Reads text and extracts images from a .pptx file on a slide-by-slide basis."""
         try:
             prs = Presentation(source)
-            full_text = []
-            image_parts = []
+            doc_pages = []
 
-            for slide in prs.slides:
+            for i, slide in enumerate(prs.slides):
+                native_text_parts = []
+                page_images = []
+
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text:
-                        full_text.append(shape.text)
+                        native_text_parts.append(shape.text)
                     
-                    # Check if the shape is a picture before trying to access its image data
                     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
-                        image_bytes = shape.image.blob
-                        
-                        # Perform OCR on the image
-                        ocr_text = ocr_image_to_text(image_bytes)
-                        if ocr_text:
-                            full_text.append(f"\n[Text from Image]:\n{ocr_text}\n")
+                        try:
+                            image_bytes = shape.image.blob
+                            
+                            ocr_text = ocr_image_to_text(image_bytes) or ""
+                            base64_image_uri = image_to_base64_uri(image_bytes)
 
-                        base64_image_uri = image_to_base64_uri(image_bytes)
-                        if base64_image_uri:
-                            image_parts.append(base64_image_uri)
+                            if base64_image_uri:
+                                page_images.append(ExtractedImage(image_uri=base64_image_uri, ocr_text=ocr_text))
+                        except Exception as e:
+                            print(f"Warning: Could not process an image on slide {i+1}: {e}")
+
+                native_text = "\n".join(native_text_parts)
+                doc_pages.append(Page(
+                    page_number=i + 1, 
+                    native_text=native_text,
+                    extracted_images=page_images
+                ))
             
-            content = "\n".join(full_text)
-            print(f"Successfully read content and {len(image_parts)} images from {source}")
-            return Document(content=content, source=source, images=image_parts)
+            print(f"Successfully read {len(doc_pages)} slides from {source}")
+            return Document(source=source, pages=doc_pages)
         except Exception as e:
             print(f"Error reading PPTX file: {str(e)}")
             raise e

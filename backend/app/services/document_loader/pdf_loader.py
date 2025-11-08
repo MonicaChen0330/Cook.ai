@@ -1,57 +1,70 @@
 
-import pypdf
+import pdfplumber
 import base64
 import io
 from PIL import Image
-from . import Document, DocumentLoader
+from . import Document, Page, DocumentLoader
 from .ocr_utils import ocr_image_to_text
+from .image_utils import image_to_base64_uri
 
 class PdfLoader(DocumentLoader):
     """A loader for PDF files that extracts text and converts images to a web-safe format."""
 
     def load(self, source: str) -> Document:
-        """Reads text and extracts/converts images from a PDF."""
+        """Reads text and extracts/converts images from a PDF on a page-by-page basis."""
+
+        doc_pages = []
+
         try:
-            with open(source, "rb") as f:
-                reader = pypdf.PdfReader(f)
-                text_parts = []
-                image_parts = []
+            with pdfplumber.open(source) as pdf:
+                for page_num, page in enumerate(pdf.pages):
 
-                for page_num, page in enumerate(reader.pages):
-                    # Extract text
-                    text = page.extract_text()
-                    if text:
-                        text_parts.append(text)
+                    # 處理文字
+                    text_elements = []                    
+                    for block in page.extract_text_lines(keep_blank_chars=True):
+                        text_elements.append({
+                            "type": "text",
+                            "content": block["text"],
+                            "top": block["top"] # 儲存垂直位置
+                        })
                     
-                    # Extract and convert images
-                    for i, image_file_object in enumerate(page.images):
-                        try:
-                            # Open the raw image data with Pillow
-                            raw_image = io.BytesIO(image_file_object.data)
-                            pil_image = Image.open(raw_image)
+                    # 處理圖片
+                    image_elements = []
+                    for img in page.images:
+                        image_data = img.get("stream").get_data() 
+                        
+                        if not image_data:
+                            continue
 
-                            # Convert to PNG and write to an in-memory buffer
-                            with io.BytesIO() as buffer:
-                                pil_image.save(buffer, format="PNG")
-                                png_image_bytes = buffer.getvalue()
+                        base64_string = image_to_base64_uri(image_data) # 轉 Base64
+                        ocr_text_result = ocr_image_to_text(image_data) # OCR提取圖片文字
 
-                            # Perform OCR on the image
-                            ocr_text = ocr_image_to_text(png_image_bytes)
-                            if ocr_text:
-                                text_parts.append(f"\n[Text from Image {i+1} on page {page_num + 1}]:\n{ocr_text}\n")
+                        image_elements.append({
+                            "type": "image",
+                            "base64": base64_string,
+                            "ocr_text": ocr_text_result,
+                            "top": img["top"] # 儲存垂直位置
+                        })
 
-                            # Encode the PNG bytes in base64
-                            base64_image = base64.b64encode(png_image_bytes).decode('utf-8')
-                            image_uri = f"data:image/png;base64,{base64_image}"
-                            image_parts.append(image_uri)
-                            # print(f"Successfully converted and extracted image {i+1} from page {page_num + 1}.")
-                        except Exception as e:
-                            print(f"Warning: Could not process an image on page {page_num + 1}: {e}")
+                    # 依垂直位置 (top) 排序所有元素
+                    all_elements = sorted(text_elements + image_elements, key=lambda x: x["top"])
 
-                full_content = "\n\n".join(text_parts)
-                print(f"Successfully read content and {len(image_parts)} images from {source}")
-                return Document(content=full_content, source=source, images=image_parts)
+                    # 移除 'top' 鍵，因為資料庫不需要它
+                    structured_elements_for_this_page = []
+                    for el in all_elements:
+                        el.pop("top") # 刪除 'top'
+                        structured_elements_for_this_page.append(el)
+
+                    # 建立新的 Page 物件
+                    new_page_object = Page(
+                        page_number=page_num + 1,
+                        structured_elements=structured_elements_for_this_page
+                    )
+                    doc_pages.append(new_page_object)
+                    
+                print(f"Successfully read {len(doc_pages)} pages from {source}")
+                return Document(source=source, pages=doc_pages)
 
         except Exception as e:
-            print(f"Error reading PDF: {str(e)}")
+            print(f"Error reading PDF with pdfplumber: {str(e)}")
             raise e

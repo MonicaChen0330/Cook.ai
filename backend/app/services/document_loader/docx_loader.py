@@ -1,4 +1,4 @@
-from . import Document, DocumentLoader
+from . import Document, Page, ExtractedImage, DocumentLoader
 from docx import Document as DocxDocument
 from .image_utils import image_to_base64_uri
 from .ocr_utils import ocr_image_to_text
@@ -10,30 +10,33 @@ class DocxLoader(DocumentLoader):
         """Reads text and extracts images from a .docx file."""
         try:
             doc = DocxDocument(source)
-            full_text = []
-            image_parts = []
+            native_text_parts = []
+            doc_images = []
 
             for para in doc.paragraphs:
-                full_text.append(para.text)
+                native_text_parts.append(para.text)
             
             # Extract images from inline shapes
             for rel in doc.part.rels:
                 if "image" in doc.part.rels[rel].target_ref:
-                    image_part = doc.part.rels[rel].target_part
-                    image_bytes = image_part.blob
-                    
-                    # Perform OCR on the image
-                    ocr_text = ocr_image_to_text(image_bytes)
-                    if ocr_text:
-                        full_text.append(f"\n[Text from Image]:\n{ocr_text}\n")
+                    try:
+                        image_part = doc.part.rels[rel].target_part
+                        image_bytes = image_part.blob
+                        
+                        ocr_text = ocr_image_to_text(image_bytes) or ""
+                        base64_image_uri = image_to_base64_uri(image_bytes)
 
-                    base64_image_uri = image_to_base64_uri(image_bytes)
-                    if base64_image_uri:
-                        image_parts.append(base64_image_uri)
+                        if base64_image_uri:
+                            doc_images.append(ExtractedImage(image_uri=base64_image_uri, ocr_text=ocr_text))
+                    except Exception as e:
+                        print(f"Warning: Could not process an image in {source}: {e}")
 
-            content = "\n".join(full_text)
-            print(f"Successfully read content and {len(image_parts)} images from {source}")
-            return Document(content=content, source=source, images=image_parts)
+            # Consolidate all text into a single string for one page
+            native_text = "\n".join(native_text_parts)
+            single_page = Page(page_number=1, native_text=native_text, extracted_images=doc_images)
+
+            print(f"Successfully read content and {len(doc_images)} images from {source}")
+            return Document(source=source, pages=[single_page])
         except Exception as e:
             print(f"Error reading DOCX file: {str(e)}")
             raise e
