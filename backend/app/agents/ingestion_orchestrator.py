@@ -162,7 +162,11 @@ def _generate_human_text_from_structured_content(content_list: list) -> str:
     return " ".join(parts).strip()
 
 # --- Main Orchestrator Logic ---
-def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_id: int = None, force_reprocess: bool = False):
+def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_id: int = None, force_reprocess: bool = False) -> int | None:
+    """
+    Processes a single file for ingestion, including hashing, parsing, chunking, and embedding.
+    Returns the unique_content_id if successful, otherwise None.
+    """
     file_name = file_path.split('/')[-1]
     file_type = file_name.split('.')[-1]
     
@@ -197,7 +201,6 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                             _update_agent_task(conn_data, task_id_hash, "completed", {"status": "skipped", "file_hash": file_hash, "unique_content_id": existing_id}, int((time.perf_counter() - start_time) * 1000))
                         else:
                             print(f"Force reprocess is True. Deleting existing content with ID {existing_id} and all related data.")
-                            # 由於 'ondelete=CASCADE'，我們只需要刪除 unique_contents
                             delete_stmt = delete(unique_contents).where(unique_contents.c.id == existing_id)
                             conn_data.execute(delete_stmt)
                             print(f"Successfully deleted old content and its relations (CASCADE).")
@@ -222,14 +225,11 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     )
                     existing_material = conn_data.execute(stmt_check_material).scalar_one_or_none()
                     
-                    link_output = {}
                     if not existing_material:
                         print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Linking content {unique_content_id} to course {course_id} with name '{file_name}'.")
                         stmt_insert_material = insert(materials).values(
-                            unique_content_id=unique_content_id,
-                            course_id=course_id,
-                            uploader_id=uploader_id,
-                            course_unit_id=course_unit_id,
+                            unique_content_id=unique_content_id, course_id=course_id,
+                            uploader_id=uploader_id, course_unit_id=course_unit_id,
                             file_name=file_name
                         )
                         conn_data.execute(stmt_insert_material)
@@ -245,7 +245,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     if skip_processing:
                         print(f"File '{file_name}' was already processed. Linking complete. Skipping ingestion.")
                         _log_job_end(conn_job_log, job_id, "completed")
-                        return # 退出 process_file
+                        return unique_content_id
 
                     # --- Task 3: Document Loading & Parsing ---
                     start_time = time.perf_counter()
@@ -264,12 +264,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
 
                     preview_data = []
                     for page in document.pages:
-                        try:
-                            structured_json = page.structured_elements
-                        except AttributeError:
-                            print(f"ERROR: Page object is missing 'structured_elements'. Loader needs update!")
-                            raise
-                        
+                        structured_json = getattr(page, 'structured_elements', [])
                         human_readable_text = _generate_human_text_from_structured_content(structured_json)
                         page.text_for_chunking = human_readable_text
                         
@@ -282,7 +277,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                             })
                     
                     if preview_data:
-                        conn_data.execute(insert(document_content), preview_data) # <-- 寫入 'document_content'
+                        conn_data.execute(insert(document_content), preview_data)
 
                     duration_ms = int((time.perf_counter() - start_time) * 1000)
                     _update_agent_task(conn_data, task_id_preview, "completed", {"saved_preview_rows": len(preview_data)}, duration_ms)
@@ -293,11 +288,8 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     
                     from app.services.text_splitter import chunk_document
                     chunks_with_metadata = chunk_document(
-                        pages=document.pages, 
-                        chunk_size=1000, 
-                        chunk_overlap=150,
-                        file_name=file_name, 
-                        uploader_id=uploader_id
+                        pages=document.pages, chunk_size=1000, chunk_overlap=150,
+                        file_name=file_name, uploader_id=uploader_id
                     )
                     
                     duration_ms = int((time.perf_counter() - start_time) * 1000)
@@ -307,30 +299,24 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     start_time = time.perf_counter()
                     task_id_save = _log_agent_task(conn_data, job_id, "embedding_generator_and_writer", "Generate embeddings and save chunks", {"chunk_count": len(chunks_with_metadata)})
                     
-                    chunk_data = []
                     if chunks_with_metadata:
-                        # Extract text for batch embedding
                         texts_to_embed = [text for text, meta in chunks_with_metadata]
-                        
-                        # Generate embeddings in a batch
                         from app.services.embedding_service import embedding_service
                         embeddings = embedding_service.create_embeddings(texts_to_embed)
                         
-                        # Combine chunks with their embeddings
-                        for i, ((text, meta), embedding) in enumerate(zip(chunks_with_metadata, embeddings)):
-                            chunk_data.append({
-                                "unique_content_id": unique_content_id,
-                                "chunk_text": text,
-                                "chunk_order": i,
-                                "metadata": meta,
-                                "embedding": embedding 
-                            })
-
-                    if chunk_data:
+                        chunk_data = [
+                            {
+                                "unique_content_id": unique_content_id, "chunk_text": text,
+                                "chunk_order": i, "metadata": meta, "embedding": embedding
+                            } for i, ((text, meta), embedding) in enumerate(zip(chunks_with_metadata, embeddings))
+                        ]
                         conn_data.execute(insert(document_chunks), chunk_data)
-                    
-                    duration_ms = int((time.perf_counter() - start_time) * 1000)
-                    _update_agent_task(conn_data, task_id_save, "completed", {"saved_chunks": len(chunk_data)}, duration_ms)
+                        
+                        duration_ms = int((time.perf_counter() - start_time) * 1000)
+                        _update_agent_task(conn_data, task_id_save, "completed", {"saved_chunks": len(chunk_data)}, duration_ms)
+                    else:
+                        duration_ms = int((time.perf_counter() - start_time) * 1000)
+                        _update_agent_task(conn_data, task_id_save, "completed", {"saved_chunks": 0}, duration_ms)
 
                     # --- Task 7: Finalize Status ---
                     start_time = time.perf_counter()
@@ -344,11 +330,13 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
 
                 _log_job_end(conn_job_log, job_id, "completed") 
                 print(f"\nSuccessfully processed and INGESTED file '{file_name}'.")
+                return unique_content_id
 
         except Exception as e:
             print(f"ERROR: An error occurred during file ingestion. Transaction for this file rolled back. Error: {e}")
             with conn_job_log.begin(): 
                 _log_job_end(conn_job_log, job_id, "failed", error_message=str(e))
+            return None
 
 if __name__ == '__main__':
     FORCE_REPROCESS = False  # Set to True to force reprocessing of existing files
@@ -367,13 +355,17 @@ if __name__ == '__main__':
         print(f"Processing file: {test_file_path}")
         print("="*50)
         try:
-            process_file(
+            content_id = process_file(
                 file_path=test_file_path,
                 uploader_id=1,
                 course_id=1, 
                 course_unit_id=1,
                 force_reprocess=FORCE_REPROCESS
             )
+            if content_id:
+                print(f"\n--- Successfully processed file. Unique Content ID: {content_id} ---")
+            else:
+                print(f"\n--- Failed to process file: {test_file_path} ---")
         except Exception as e:
             print(f"!!! FAILED to process {test_file_path}: {e} !!!")
     print("\n--- All Document Ingestion Tests Finished ---")

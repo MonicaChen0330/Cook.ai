@@ -1,18 +1,28 @@
 
-from typing import TypedDict, List
+from typing import TypedDict, List, Dict, Any, Optional
 
 class ExamGenerationState(TypedDict):
-    """Defines the state for the exam generation graph."""
+    """
+    Defines the state for the exam generation graph under the new plan-and-execute architecture.
+    """
     # Inputs
     query: str
-    unique_content_id: int # New input: ID for the content to be processed
-    question_type: str  # e.g., 'multiple_choice', 'short_answer', 'true_false'
+    unique_content_id: int
     
-    # Internal state
-    retrieved_content: str # Renamed from document_content
-    document_images: List[str] # To hold base64 encoded images from the document
+    # This will be deprecated by the plan, but is kept for now.
+    question_type: str  
+
+    # --- New Architecture Fields ---
+    # Planning state
+    generation_plan: List[Dict[str, Any]] # The plan from the LLM router (e.g., [{'type': 'multiple_choice', 'count': 3}])
+    current_task: Optional[Dict[str, Any]] # The current task being executed by a generation node
     
-    # Outputs
-    generated_questions: str # Or you can use List[dict] for structured questions
-    error: str | None
+    # Retrieval state
+    retrieved_text_chunks: List[Dict[str, Any]]  # Lightweight, for debugging and planning
+    retrieved_page_content: List[Dict[str, Any]] # Heavyweight, with base64, for generation
+    
+    # Output state
+    final_generated_content: List[str] # Accumulates results from each generation task
+    
+    error: Optional[str]
 
