@@ -4,11 +4,15 @@ Orchestrator for handling the ingestion of documents into the system.
 import hashlib
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any
 from dotenv import load_dotenv
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (create_engine, MetaData, Table, Column, Integer, String, 
                         DateTime, JSON, insert, update, select, Text, delete, ForeignKey, DECIMAL, BOOLEAN)
+
+# --- Timezone Setup ---
+TAIPEI_TZ = timezone(timedelta(hours=8))
 
 # --- Database Setup ---
 load_dotenv()
@@ -25,8 +29,8 @@ orchestration_jobs = Table('orchestration_jobs', metadata,
     Column('input_prompt', Text),
     Column('status', String(50)),
     Column('final_output_id', Integer, ForeignKey('generated_contents.id')),
-    Column('created_at', DateTime, default=datetime.now),
-    Column('updated_at', DateTime, default=datetime.now, onupdate=datetime.now),
+    Column('created_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ)),
+    Column('updated_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ), onupdate=lambda: datetime.now(TAIPEI_TZ)),
     Column('workflow_type', String(50)),
     Column('experiment_config', JSON),
     Column('total_iterations', Integer),
@@ -54,7 +58,7 @@ agent_tasks = Table('agent_tasks', metadata,
     Column('estimated_cost_usd', DECIMAL),
     Column('model_name', String(100)),
     Column('model_parameters', JSON),
-    Column('created_at', DateTime, default=datetime.now),
+    Column('created_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ)),
     Column('completed_at', DateTime)
 )
 
@@ -64,7 +68,7 @@ unique_contents = Table('unique_contents', metadata,
     Column('file_size_bytes', Integer),
     Column('original_file_type', String(20)),
     Column('processing_status', String(20), default='pending'),
-    Column('created_at', DateTime, default=datetime.now)
+    Column('created_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ))
 )
 
 materials = Table('materials', metadata,
@@ -74,8 +78,8 @@ materials = Table('materials', metadata,
     Column('course_unit_id', Integer, ForeignKey('course_units.id'), nullable=True),
     Column('file_name', String(255), nullable=False),
     Column('unique_content_id', Integer, ForeignKey('unique_contents.id', ondelete='CASCADE'), nullable=False),
-    Column('created_at', DateTime, default=datetime.now),
-    Column('updated_at', DateTime, default=datetime.now, onupdate=datetime.now)
+    Column('created_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ)),
+    Column('updated_at', DateTime, default=lambda: datetime.now(TAIPEI_TZ), onupdate=lambda: datetime.now(TAIPEI_TZ))
 )
 
 document_chunks = Table('document_chunks', metadata,
@@ -84,6 +88,7 @@ document_chunks = Table('document_chunks', metadata,
     Column('chunk_text', Text),
     Column('chunk_order', Integer),
     Column('metadata', JSON),
+    Column('embedding', Vector(1536)),
 )
 
 document_content = Table('document_content', metadata,
@@ -96,7 +101,7 @@ document_content = Table('document_content', metadata,
 
 # --- Logging Functions ---
 def _log_job_start(conn, user_id: int, file_name: str) -> int:
-    print(f"[{datetime.now()}] DB LOG: Creating orchestration job for user {user_id} to ingest '{file_name}'.")
+    print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Creating orchestration job for user {user_id} to ingest '{file_name}'.")
     stmt = insert(orchestration_jobs).values(
         user_id=user_id, 
         input_prompt=f"[INGEST] Uploaded file: {file_name}",
@@ -107,7 +112,7 @@ def _log_job_start(conn, user_id: int, file_name: str) -> int:
     return result.scalar_one()
 
 def _log_job_end(conn, job_id: int, status: str, error_message: str = None):
-    print(f"[{datetime.now()}] DB LOG: Updating job {job_id} to status '{status}'.")
+    print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Updating job {job_id} to status '{status}'.")
     update_values = {'status': status}
     if error_message:
         update_values['error_message'] = error_message
@@ -115,7 +120,7 @@ def _log_job_end(conn, job_id: int, status: str, error_message: str = None):
     conn.execute(stmt)
 
 def _log_agent_task(conn, job_id: int, agent_name: str, description: str, inputs: Dict[str, Any]) -> int:
-    print(f"[{datetime.now()}] DB LOG: Job {job_id} - Starting task for agent '{agent_name}': {description}")
+    print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Job {job_id} - Starting task for agent '{agent_name}': {description}")
     stmt = insert(agent_tasks).values(
         job_id=job_id, 
         agent_name=agent_name, 
@@ -128,12 +133,12 @@ def _log_agent_task(conn, job_id: int, agent_name: str, description: str, inputs
     return result.scalar_one()
 
 def _update_agent_task(conn, task_id: int, status: str, output: Any, duration_ms: int, error_message: str = None):
-    print(f"[{datetime.now()}] DB LOG: Task {task_id} finished with status '{status}' in {duration_ms}ms.")
+    print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Task {task_id} finished with status '{status}' in {duration_ms}ms.")
     update_values = {
         'status': status,
         'output': str(output),
         'duration_ms': duration_ms,
-        'completed_at': datetime.now()
+        'completed_at': datetime.now(TAIPEI_TZ)
     }
     if error_message:
         update_values['error_message'] = error_message
@@ -219,7 +224,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     
                     link_output = {}
                     if not existing_material:
-                        print(f"[{datetime.now()}] DB LOG: Linking content {unique_content_id} to course {course_id} with name '{file_name}'.")
+                        print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Linking content {unique_content_id} to course {course_id} with name '{file_name}'.")
                         stmt_insert_material = insert(materials).values(
                             unique_content_id=unique_content_id,
                             course_id=course_id,
@@ -230,7 +235,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                         conn_data.execute(stmt_insert_material)
                         link_output = {"status": "linked"}
                     else:
-                        print(f"[{datetime.now()}] DB LOG: Content {unique_content_id} already linked to course {course_id}.")
+                        print(f"[{datetime.now(TAIPEI_TZ)}] DB LOG: Content {unique_content_id} already linked to course {course_id}.")
                         link_output = {"status": "already_exists"}
 
                     duration_ms = int((time.perf_counter() - start_time) * 1000)
@@ -298,11 +303,29 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     duration_ms = int((time.perf_counter() - start_time) * 1000)
                     _update_agent_task(conn_data, task_id_chunk, "completed", {"chunk_count": len(chunks_with_metadata)}, duration_ms)
 
-                    # --- Task 6: Database Storage of Chunks ---
+                    # --- Task 6: Generate Embeddings and Store Chunks ---
                     start_time = time.perf_counter()
-                    task_id_save = _log_agent_task(conn_data, job_id, "database_writer", "Save chunks with metadata", {"chunk_count": len(chunks_with_metadata)})
+                    task_id_save = _log_agent_task(conn_data, job_id, "embedding_generator_and_writer", "Generate embeddings and save chunks", {"chunk_count": len(chunks_with_metadata)})
                     
-                    chunk_data = [{"unique_content_id": unique_content_id, "chunk_text": text, "chunk_order": i, "metadata": meta} for i, (text, meta) in enumerate(chunks_with_metadata)]
+                    chunk_data = []
+                    if chunks_with_metadata:
+                        # Extract text for batch embedding
+                        texts_to_embed = [text for text, meta in chunks_with_metadata]
+                        
+                        # Generate embeddings in a batch
+                        from app.services.embedding_service import embedding_service
+                        embeddings = embedding_service.create_embeddings(texts_to_embed)
+                        
+                        # Combine chunks with their embeddings
+                        for i, ((text, meta), embedding) in enumerate(zip(chunks_with_metadata, embeddings)):
+                            chunk_data.append({
+                                "unique_content_id": unique_content_id,
+                                "chunk_text": text,
+                                "chunk_order": i,
+                                "metadata": meta,
+                                "embedding": embedding 
+                            })
+
                     if chunk_data:
                         conn_data.execute(insert(document_chunks), chunk_data)
                     
@@ -328,7 +351,7 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                 _log_job_end(conn_job_log, job_id, "failed", error_message=str(e))
 
 if __name__ == '__main__':
-    FORCE_REPROCESS = True
+    FORCE_REPROCESS = False  # Set to True to force reprocessing of existing files
     print(f"--- Starting Multimodal Document Ingestion Test (Force Reprocess: {FORCE_REPROCESS}) ---")
     TEST_FILES_DIR = "test_files"
     if not os.path.isdir(TEST_FILES_DIR):
