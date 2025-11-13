@@ -4,6 +4,7 @@ from .state import ExamGenerationState
 
 load_dotenv()
 
+
 # Import all the necessary nodes and the new router logic
 from .exam_nodes import (
     retrieve_chunks_node,
@@ -63,7 +64,7 @@ app = workflow.compile()
 if __name__ == '__main__':
     import os
     import json
-    from app.agents.ingestion_orchestrator import process_file
+    from backend.app.agents.teacher_agent.ingestion import process_file
 
     print("--- End-to-End Material Generator Test Runner (Plan-and-Execute) ---")
     

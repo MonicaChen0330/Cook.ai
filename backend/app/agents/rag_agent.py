@@ -1,10 +1,10 @@
 
 import os
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy import create_engine, text, MetaData, Table, select
 from dotenv import load_dotenv
 
-from app.services.embedding_service import embedding_service
+from backend.app.services.embedding_service import embedding_service
 
 # --- Database Setup ---
 load_dotenv()
@@ -25,7 +25,7 @@ class RAGAgent:
     Agent for performing Retrieval-Augmented Generation tasks.
     """
 
-    def search(self, user_prompt: str, unique_content_id: int, top_k: int = 5) -> Dict[str, List[Dict[str, Any]]]:
+    def search(self, user_prompt: str, unique_content_id: int, top_k: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
         """
         Performs a multi-modal RAG search and returns a dictionary separating
         text chunks from full page content.
@@ -33,13 +33,16 @@ class RAGAgent:
         Args:
             user_prompt: The user's query.
             unique_content_id: The ID of the specific document to search within.
-            top_k: The number of top similar chunks to retrieve.
+            top_k: The number of top similar chunks to retrieve. If None, it will be read from RAG_TOP_K environment variable, defaulting to 3.
 
         Returns:
             A dictionary with two keys:
             - "text_chunks": A list of lightweight text chunks for debugging/planning.
             - "page_content": A list of heavyweight structured page content for generation.
         """
+        if top_k is None:
+            top_k = int(os.getenv("RAG_TOP_K", "3"))
+        
         print(f"--- RAGAgent: Starting Search for prompt: '{user_prompt}' within document ID: {unique_content_id} ---")
 
         # Step 1: Vector Search (Text RAG)
