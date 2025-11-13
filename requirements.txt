@@ -16,6 +16,7 @@ click==8.3.0
 cryptography==46.0.3
 dataclasses-json==0.6.7
 distro==1.9.0
+fastapi==0.111.0
 Flask==3.1.2
 frozenlist==1.8.0
 google-api-core==2.26.0
@@ -54,7 +55,7 @@ MarkupSafe==3.0.3
 marshmallow==3.26.1
 mcp==1.18.0
 multidict==6.7.0
-mypy_extensions==1.1.0
+mypy_extensions==1.1.1
 numpy==2.3.4
 oauthlib==3.3.1
 openai>=1.0.0
