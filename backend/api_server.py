@@ -4,6 +4,7 @@ import tempfile
 from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 # Correctly import the refactored modules
 from backend.app.agents.teacher_agent.ingestion import process_file
@@ -22,12 +23,12 @@ class IngestResponse(BaseModel):
     unique_content_id: int
     message: str
 
-class GenerateRequest(BaseModel):
+class GenerateExamRequest(BaseModel):
     unique_content_id: int
     prompt: str
     user_id: int = 1 # Default mock user ID
 
-class GenerateResponse(BaseModel):
+class GenerateExamResponse(BaseModel):
     job_id: int
     result: Any
 
@@ -35,8 +36,8 @@ class GenerateResponse(BaseModel):
 
 @app.post("/api/ingest", response_model=IngestResponse)
 async def ingest_document(
-    course_id: int = Form(...),
-    uploader_id: int = Form(...),
+    course_id: int = Form(1),
+    uploader_id: int = Form(1),
     file: UploadFile = File(...)
 ):
     """
@@ -53,7 +54,7 @@ async def ingest_document(
 
         # The ingestion process is synchronous but involves I/O.
         # Running it in a thread pool is good practice for an async server.
-        unique_content_id = await app.router.run_in_threadpool(
+        unique_content_id = await run_in_threadpool(
             process_file,
             file_path=file_path,
             uploader_id=uploader_id,
@@ -69,8 +70,8 @@ async def ingest_document(
         message=f"Successfully ingested file '{file.filename}'."
     )
 
-@app.post("/api/generate", response_model=GenerateResponse)
-async def generate_materials(request: GenerateRequest):
+@app.post("/api/generate_exam", response_model=GenerateExamResponse)
+async def generate_exam(request: GenerateExamRequest):
     """
     Endpoint to trigger the generation of materials by the Teacher Agent.
     """
@@ -94,7 +95,7 @@ async def generate_materials(request: GenerateRequest):
 
     try:
         # The graph is synchronous, run it in a thread pool
-        final_state = await app.router.run_in_threadpool(teacher_agent_app.invoke, inputs)
+        final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
 
         if final_state.get('error'):
             error_message = f"Generation failed: {final_state.get('error')}"
@@ -102,7 +103,7 @@ async def generate_materials(request: GenerateRequest):
             raise HTTPException(status_code=500, detail=error_message)
         else:
             db_logger.update_job_status(job_id, 'completed')
-            return GenerateResponse(
+            return GenerateExamResponse(
                 job_id=job_id,
                 result=final_state.get("final_result", [])
             )
@@ -116,7 +117,7 @@ def read_root():
 
 # --- Test Endpoint ---
 
-@app.post("/api/test/ingest_and_generate", response_model=GenerateResponse)
+@app.post("/api/test/ingest_and_generate", response_model=GenerateExamResponse)
 async def test_ingest_and_generate(
     prompt: str = Form(...),
     course_id: int = Form(1),
@@ -133,7 +134,7 @@ async def test_ingest_and_generate(
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         
-        unique_content_id = await app.router.run_in_threadpool(
+        unique_content_id = await run_in_threadpool(
             process_file,
             file_path=file_path,
             uploader_id=uploader_id,
@@ -163,7 +164,7 @@ async def test_ingest_and_generate(
     }
 
     try:
-        final_state = await app.router.run_in_threadpool(teacher_agent_app.invoke, inputs)
+        final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
 
         if final_state.get('error'):
             error_message = f"[Test] Generation failed: {final_state.get('error')}"
@@ -171,7 +172,7 @@ async def test_ingest_and_generate(
             raise HTTPException(status_code=500, detail=error_message)
         else:
             db_logger.update_job_status(job_id, 'completed')
-            return GenerateResponse(
+            return GenerateExamResponse(
                 job_id=job_id,
                 result=final_state.get("final_result", [])
             )
