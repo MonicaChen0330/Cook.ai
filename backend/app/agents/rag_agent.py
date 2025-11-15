@@ -3,6 +3,7 @@ import os
 from typing import List, Dict, Any, Tuple, Optional
 from sqlalchemy import create_engine, text, MetaData, Table, select
 from dotenv import load_dotenv
+from pgvector.sqlalchemy import Vector
 
 from backend.app.services.embedding_service import embedding_service
 
@@ -47,7 +48,7 @@ class RAGAgent:
 
         # Step 1: Vector Search (Text RAG)
         print(f"RAGAgent: Step 1 - Performing vector search for top {top_k} chunks...")
-        query_embedding = embedding_service.create_embeddings([user_prompt])[0]
+        query_embedding = embedding_service.create_embeddings([user_prompt])[0][0]
 
         stmt = text(f"""
             SELECT id, chunk_text, metadata

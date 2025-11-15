@@ -14,3 +14,4 @@ class ExamGenerationState(TypedDict):
     current_task: Optional[Dict[str, Any]]
     final_generated_content: List[str]
     error: Optional[str]
+    parent_task_id: Optional[int] # The ID of the parent task for hierarchical logging

@@ -1,6 +1,7 @@
 import time
 from langgraph.graph import StateGraph, END
 
+from .state import TeacherAgentState
 from backend.app.utils import db_logger
 from backend.app.agents.teacher_agent.skills.exam_generator.graph import app as exam_generator_app
 
@@ -12,7 +13,12 @@ def run_skill_node(state: TeacherAgentState) -> TeacherAgentState:
     Routes to and executes the appropriate skill-based sub-graph.
     """
     task_name = state.get("task_name", "exam_generation") # Default to exam generation
-    task_id = db_logger.create_task(state['job_id'], f"teacher_agent_router", f"Routing to skill: {task_name}")
+    task_id = db_logger.create_task(
+        state['job_id'], 
+        "teacher_agent_router", 
+        "Route user query to a skill.",
+        task_input={"user_query": state.get("user_query")}
+    )
     start_time = time.perf_counter()
 
     try:
@@ -22,6 +28,7 @@ def run_skill_node(state: TeacherAgentState) -> TeacherAgentState:
                 "job_id": state["job_id"],
                 "query": state["user_query"],
                 "unique_content_id": state["unique_content_id"],
+                "parent_task_id": task_id, # Pass the router's task_id as the parent
             }
             
             # Invoke the sub-graph
@@ -32,7 +39,8 @@ def run_skill_node(state: TeacherAgentState) -> TeacherAgentState:
                 raise Exception(f"Exam generator skill failed: {final_skill_state['error']}")
             
             state["final_result"] = final_skill_state.get("final_generated_content")
-            db_logger.update_task(task_id, 'completed', output=str(state["final_result"]), duration_ms=int((time.perf_counter() - start_time) * 1000))
+            # The router's output is the name of the skill it chose
+            db_logger.update_task(task_id, 'completed', output=task_name, duration_ms=int((time.perf_counter() - start_time) * 1000))
 
         else:
             # In the future, you can add more skills here

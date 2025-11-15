@@ -3,7 +3,7 @@ Utility functions for logging orchestration and agent task data to the database.
 """
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from sqlalchemy import create_engine, MetaData, Table, insert, update, select, func, text
 from sqlalchemy.orm import sessionmaker
 import os
@@ -24,6 +24,8 @@ metadata = MetaData()
 try:
     orchestration_jobs = Table('orchestration_jobs', metadata, autoload_with=engine)
     agent_tasks = Table('agent_tasks', metadata, autoload_with=engine)
+    generated_contents = Table('generated_contents', metadata, autoload_with=engine)
+    agent_task_sources = Table('agent_task_sources', metadata, autoload_with=engine)
 except Exception as e:
     print(f"Error reflecting database tables: {e}")
     # Define tables with key columns as a fallback if reflection fails
@@ -34,6 +36,14 @@ except Exception as e:
     agent_tasks = Table('agent_tasks', metadata,
         Column('id', Integer, primary_key=True),
         # ...
+    )
+    generated_contents = Table('generated_contents', metadata,
+        Column('id', Integer, primary_key=True),
+    )
+    agent_task_sources = Table('agent_task_sources', metadata,
+        Column('task_id', Integer, primary_key=True),
+        Column('source_type', String, primary_key=True),
+        Column('source_id', Integer, primary_key=True),
     )
 
 # --- Job-level Logging ---
@@ -77,7 +87,7 @@ def update_job_status(job_id: int, status: str, error_message: Optional[str] = N
 
 # --- Task-level Logging ---
 
-def create_task(job_id: int, agent_name: str, task_description: str, task_input: Optional[Dict] = None, model_name: Optional[str] = None) -> Optional[int]:
+def create_task(job_id: int, agent_name: str, task_description: str, task_input: Optional[Dict] = None, model_name: Optional[str] = None, parent_task_id: Optional[int] = None, model_parameters: Optional[Dict] = None) -> Optional[int]:
     """Creates a new record in the agent_tasks table and returns its ID and start time."""
     try:
         with engine.connect() as conn:
@@ -88,6 +98,8 @@ def create_task(job_id: int, agent_name: str, task_description: str, task_input:
                 task_input=task_input,
                 status='in_progress',
                 model_name=model_name,
+                parent_task_id=parent_task_id,
+                model_parameters=model_parameters,
                 created_at=datetime.now(TAIPEI_TZ)
             ).returning(agent_tasks.c.id)
             result = conn.execute(stmt)
@@ -106,7 +118,8 @@ def update_task(
     error_message: Optional[str] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
-    duration_ms: Optional[int] = None
+    duration_ms: Optional[int] = None,
+    estimated_cost_usd: Optional[float] = None
 ):
     """Updates an agent_task record upon completion or failure."""
     try:
@@ -118,7 +131,8 @@ def update_task(
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "duration_ms": duration_ms,
-                "completed_at": datetime.now(TAIPEI_TZ)
+                "completed_at": datetime.now(TAIPEI_TZ),
+                "estimated_cost_usd": estimated_cost_usd
             }
             # Filter out None values so they don't overwrite existing data in the DB
             values_to_update = {k: v for k, v in values_to_update.items() if v is not None}
@@ -129,3 +143,62 @@ def update_task(
             print(f"[DB Logger] Updated task {task_id} to status '{status}'.")
     except Exception as e:
         print(f"[DB Logger] ERROR: Failed to update task {task_id}. Reason: {e}")
+
+
+# --- Content and Source Logging ---
+
+def log_task_sources(task_id: int, source_chunks: Optional[List[Dict]] = None):
+    """Logs the retrieved source chunks for a specific task."""
+    if not source_chunks:
+        return
+
+    try:
+        with engine.connect() as conn:
+            records_to_insert = [
+                {
+                    "task_id": task_id,
+                    "source_type": 'chunk',
+                    "source_id": chunk.get("chunk_id")
+                }
+                for chunk in source_chunks if chunk.get("chunk_id") is not None
+            ]
+            
+            if not records_to_insert:
+                return
+
+            # Use a transaction for the insert
+            with conn.begin():
+                conn.execute(insert(agent_task_sources), records_to_insert)
+            
+            print(f"[DB Logger] Logged {len(records_to_insert)} sources for task {task_id}.")
+
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to log sources for task {task_id}. Reason: {e}")
+
+
+def save_generated_content(task_id: int, content_type: str, title: str, content: str) -> Optional[int]:
+    """Saves generated content to the GENERATED_CONTENTS table."""
+    try:
+        with engine.connect() as conn:
+            # The 'content' column in the DB is JSON, so we wrap the string output
+            json_content = {"text_output": content}
+            
+            stmt = insert(generated_contents).values(
+                source_agent_task_id=task_id,
+                content_type=content_type,
+                title=title,
+                content=json_content,
+                created_at=datetime.now(TAIPEI_TZ),
+                updated_at=datetime.now(TAIPEI_TZ)
+            ).returning(generated_contents.c.id)
+            
+            result = conn.execute(stmt)
+            content_id = result.scalar_one()
+            conn.commit()
+            
+            print(f"[DB Logger] Saved generated content for task {task_id}. New content ID: {content_id}.")
+            return content_id
+            
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to save generated content for task {task_id}. Reason: {e}")
+        return None

@@ -7,6 +7,7 @@ import os
 from typing import Dict, Any
 
 from sqlalchemy import create_engine, MetaData, Table, select, insert, update, delete
+from pgvector.sqlalchemy import Vector
 
 from backend.app.utils import db_logger
 
@@ -61,8 +62,11 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
     try:
         with engine.connect() as conn:
             with conn.begin() as transaction:
+                last_task_id = None # Initialize for sequential parent_task_id logging
+
                 # --- Task 1: Hashing and Get-Or-Create Unique Content ---
-                task_id_hash = db_logger.create_task(job_id, "hash_file", "Calculate file hash and check for existence.")
+                task_id_hash = db_logger.create_task(job_id, "hash_file", "Calculate file hash and check for existence.", task_input={"file_path": file_path}, parent_task_id=last_task_id)
+                last_task_id = task_id_hash
                 start_time = time.perf_counter()
                 
                 with open(file_path, "rb") as f:
@@ -89,7 +93,8 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     db_logger.update_task(task_id_hash, 'completed', f"Created new unique_content with ID {unique_content_id}.", duration_ms=duration_ms)
 
                 # --- Task 2: Link Material to Course ---
-                task_id_link = db_logger.create_task(job_id, "link_material", "Link content to course.")
+                task_id_link = db_logger.create_task(job_id, "link_material", "Link content to course.", task_input={"unique_content_id": unique_content_id, "course_id": course_id, "uploader_id": uploader_id}, parent_task_id=last_task_id)
+                last_task_id = task_id_link
                 start_time = time.perf_counter()
                 
                 if not conn.execute(select(materials.c.id).where((materials.c.unique_content_id == unique_content_id) & (materials.c.course_id == course_id))).scalar_one_or_none():
@@ -107,14 +112,16 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
 
                 # --- Task 3: Document Loading & Parsing ---
                 from backend.app.services.document_loader import get_loader
-                task_id_load = db_logger.create_task(job_id, "document_loader", "Load and extract text from file.")
+                task_id_load = db_logger.create_task(job_id, "document_loader", "Load and extract text from file.", task_input={"file_path": file_path}, parent_task_id=last_task_id)
+                last_task_id = task_id_load
                 start_time = time.perf_counter()
                 document = get_loader(file_path).load(file_path)
                 duration_ms = int((time.perf_counter() - start_time) * 1000)
                 db_logger.update_task(task_id_load, 'completed', f"Loaded {len(document.pages)} pages.", duration_ms=duration_ms)
 
                 # --- Task 4: Save Document Content ---
-                task_id_save_content = db_logger.create_task(job_id, "database_writer", "Save page-by-page content.")
+                task_id_save_content = db_logger.create_task(job_id, "database_writer", "Save page-by-page content.", task_input={"unique_content_id": unique_content_id}, parent_task_id=last_task_id)
+                last_task_id = task_id_save_content
                 start_time = time.perf_counter()
                 preview_data = []
                 for page in document.pages:
@@ -130,16 +137,18 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
 
                 # --- Task 5: Document Chunking ---
                 from backend.app.services.text_splitter import chunk_document
-                task_id_chunk = db_logger.create_task(job_id, "text_splitter", "Split document into chunks.")
-                start_time = time.perf_counter()
                 chunk_size = int(os.getenv("CHUNK_SIZE", "1000"))
                 chunk_overlap = int(os.getenv("CHUNK_OVERLAP", "150"))
+                task_id_chunk = db_logger.create_task(job_id, "text_splitter", "Split document into chunks.", task_input={"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}, parent_task_id=last_task_id)
+                last_task_id = task_id_chunk
+                start_time = time.perf_counter()
                 chunks_with_metadata = chunk_document(pages=document.pages, chunk_size=chunk_size, chunk_overlap=chunk_overlap, file_name=file_name, uploader_id=uploader_id)
                 duration_ms = int((time.perf_counter() - start_time) * 1000)
                 db_logger.update_task(task_id_chunk, 'completed', f"Created {len(chunks_with_metadata)} chunks.", duration_ms=duration_ms)
 
                 # --- Task 6: Generate Embeddings and Store Chunks ---
-                task_id_embed = db_logger.create_task(job_id, "embedding_generator", "Generate embeddings and save chunks.")
+                task_id_embed = db_logger.create_task(job_id, "embedding_generator", "Generate embeddings and save chunks.", task_input={"num_chunks_to_embed": len(chunks_with_metadata) if chunks_with_metadata else 0}, parent_task_id=last_task_id)
+                last_task_id = task_id_embed
                 start_time = time.perf_counter()
                 if chunks_with_metadata:
                     from backend.app.services.embedding_service import embedding_service
@@ -154,7 +163,8 @@ def process_file(file_path: str, uploader_id: int, course_id: int, course_unit_i
                     db_logger.update_task(task_id_embed, 'completed', "No chunks to embed.", duration_ms=duration_ms)
 
                 # --- Task 7: Finalize Status ---
-                task_id_finalize = db_logger.create_task(job_id, "finalize_status", "Update unique_content status to completed.")
+                task_id_finalize = db_logger.create_task(job_id, "finalize_status", "Update unique_content status to completed.", task_input={"unique_content_id": unique_content_id}, parent_task_id=last_task_id)
+                last_task_id = task_id_finalize
                 start_time = time.perf_counter()
                 conn.execute(update(unique_contents).where(unique_contents.c.id == unique_content_id).values(processing_status='completed'))
                 duration_ms = int((time.perf_counter() - start_time) * 1000)
