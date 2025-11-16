@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+import json # Import json
 
 # Correctly import the refactored modules
 from backend.app.agents.teacher_agent.ingestion import process_file
@@ -30,7 +31,7 @@ class GenerateExamRequest(BaseModel):
 
 class GenerateExamResponse(BaseModel):
     job_id: int
-    result: Any
+    result: Any # This will now be the parsed JSON object
 
 # --- API Endpoints ---
 
@@ -97,15 +98,20 @@ async def generate_exam(request: GenerateExamRequest):
         # The graph is synchronous, run it in a thread pool
         final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
 
+        # The aggregate_final_output_node now handles the final job status update.
+        # We only need to check for errors that might have prevented aggregation.
         if final_state.get('error'):
             error_message = f"Generation failed: {final_state.get('error')}"
+            # If an error occurred before aggregation, ensure job status is failed
             db_logger.update_job_status(job_id, 'failed', error_message=error_message)
             raise HTTPException(status_code=500, detail=error_message)
         else:
-            db_logger.update_job_status(job_id, 'completed')
+            # The final job status is set by aggregate_final_output_node
+            # Explicitly convert to JSON string and then back to Python object for robust serialization
+            json_serializable_content = json.loads(json.dumps(final_state.get("final_result", []), ensure_ascii=False))
             return GenerateExamResponse(
                 job_id=job_id,
-                result=final_state.get("final_result", [])
+                result=json_serializable_content
             )
     except Exception as e:
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))
@@ -174,7 +180,7 @@ async def test_ingest_and_generate(
             db_logger.update_job_status(job_id, 'completed')
             return GenerateExamResponse(
                 job_id=job_id,
-                result=final_state.get("final_result", [])
+                result=final_state.get("final_generated_content", [])
             )
     except Exception as e:
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))

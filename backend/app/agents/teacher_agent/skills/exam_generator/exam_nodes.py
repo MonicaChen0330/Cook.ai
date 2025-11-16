@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from datetime import datetime # Add this import
 from typing import List, Dict, Any, Tuple, Optional
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,40 @@ class Task(BaseModel):
 class Plan(BaseModel):
     """A structured plan consisting of a list of generation tasks."""
     tasks: List[Task] = Field(..., description="A list of generation tasks to perform based on the user's query.")
+
+# --- Pydantic Models for Question Types ---
+class Source(BaseModel):
+    page_number: str = Field(..., description="The page number from which the information was sourced.")
+    evidence: str = Field(..., description="A brief quote or explanation from the text that supports the answer.")
+
+class MultipleChoiceQuestion(BaseModel):
+    question_number: int = Field(..., description="The sequential number of the question.")
+    question_text: str = Field(..., description="The text of the multiple-choice question.")
+    options: Dict[str, str] = Field(..., description="A dictionary of options, e.g., {'A': 'Option Text A', ...}.")
+    correct_answer: str = Field(..., description="The letter corresponding to the correct answer (e.g., 'A', 'B').")
+    source: Source = Field(..., description="The source of the answer within the provided document.")
+
+class TrueFalseQuestion(BaseModel):
+    question_number: int = Field(..., description="The sequential number of the question.")
+    statement_text: str = Field(..., description="The statement to be evaluated as true or false.")
+    correct_answer: str = Field(..., description="The correct answer, either 'True' or 'False'.")
+    source: Source = Field(..., description="The source of the answer within the provided document.")
+
+class ShortAnswerQuestion(BaseModel):
+    question_number: int = Field(..., description="The sequential number of the question.")
+    question_text: str = Field(..., description="The text of the short-answer question.")
+    sample_answer: str = Field(..., description="A detailed sample correct answer for the question.")
+    source: Source = Field(..., description="The source of the answer within the provided document.")
+
+# A model to hold a list of questions for a specific type, for tool calling
+class MultipleChoiceQuestionsList(BaseModel):
+    questions: List[MultipleChoiceQuestion] = Field(..., description="A list of multiple-choice questions.")
+
+class TrueFalseQuestionsList(BaseModel):
+    questions: List[TrueFalseQuestion] = Field(..., description="A list of true/false questions.")
+
+class ShortAnswerQuestionsList(BaseModel):
+    questions: List[ShortAnswerQuestion] = Field(..., description="A list of short-answer questions.")
 
 
 # --- Pricing Info ---
@@ -111,10 +146,12 @@ def retrieve_chunks_node(state: ExamGenerationState) -> ExamGenerationState:
         db_logger.log_task_sources(task_id, rag_results["text_chunks"])
 
         state["generation_plan"], state["final_generated_content"], state["error"] = [], [], None
+        state["generation_errors"] = [] # Initialize generation_errors
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db_logger.update_task(task_id, 'completed', f"Retrieved {len(rag_results['text_chunks'])} chunks.", duration_ms=duration_ms)
     except Exception as e:
         state["error"] = f"Failed to retrieve context: {str(e)}"
+        state["generation_errors"].append({"task": "retriever", "error_message": str(e)})
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
     return state
@@ -135,7 +172,8 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> ExamGenerationStat
             "Analyze user query to create a generation plan.",
             parent_task_id=state.get("parent_task_id"),
             model_name=llm.model_name,
-            model_parameters=model_params
+            model_parameters=model_params,
+            task_input={"query": state["query"]} # Add the query to task_input
         )
         state["parent_task_id"] = task_id # Become the parent for all subsequent generation tasks
         start_time = time.perf_counter()
@@ -162,7 +200,7 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> ExamGenerationStat
         db_logger.update_task(
             task_id, 
             'completed', 
-            str(state["generation_plan"]), 
+            state["generation_plan"], # Pass the actual list of dicts
             duration_ms=duration_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -170,13 +208,14 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> ExamGenerationStat
         )
     except Exception as e:
         state["error"] = f"Failed to create a generation plan: {e}"
+        state["generation_errors"].append({"task": "plan_generation_tasks", "error_message": str(e)})
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
     return state
 
 def prepare_next_task_node(state: ExamGenerationState) -> ExamGenerationState:
     """Pops the next task from the plan and sets it as the current task."""
-    state["error"] = None
+    state["error"] = None # Clear temporary error for next task
     if state.get("generation_plan") and len(state["generation_plan"]) > 0:
         state["current_task"] = state["generation_plan"].pop(0)
     else:
@@ -185,108 +224,20 @@ def prepare_next_task_node(state: ExamGenerationState) -> ExamGenerationState:
 
 def should_continue_router(state: ExamGenerationState) -> str:
     """Router that checks the current task and decides where to go next."""
-    if state.get("error"): return "handle_error"
+    # If there's a temporary error from the previous task, it's already logged in generation_errors.
+    # We want to continue processing other tasks if possible, or go to aggregation.
     current_task = state.get("current_task")
     if current_task:
         task_type = current_task.get("type")
-        return f"generate_{task_type}" if task_type in ["multiple_choice", "short_answer", "true_false"] else "handle_error"
-    return "end"
+        return f"generate_{task_type}" if task_type in ["multiple_choice", "short_answer", "true_false"] else "end" # Return "end" for aggregation
+    return "end" # Go to aggregation if no more tasks
 
 # --- Refactored Generation Logic ---
 
-MC_PROMPT_TEMPLATE = """You are a professional university professor (您是一位專業的大學教師) designing an exam. Your task is to generate high-quality multiple-choice questions based on the provided text content and images.
-
-**--- CRITICAL PRINCIPLES ---**
-1.  **Must Provide Correct Answer:** Every question must have a clearly indicated correct answer.
-2.  **Must Cite Source with Evidence:** DO NOT just provide the page number. You MUST include the **Page Number** AND a **brief quote or explanation** from the text that supports why the answer is correct.
-    - **Wrong Example:** "**出處:** 第 5 頁"
-    - **Correct Example:** "**出處:** 第 5 頁，文中提到 '粒線體是細胞的發電廠'。"
-3.  **Clean and Contextualize the Evidence:** The quoted text must be cleaned. Remove any formatting artifacts (like '○', bullet points, etc.). Ensure it forms a complete, coherent sentence or phrase that provides sufficient context for the answer, even if the question implies part of the context.
-4.  **Language:** All output must be in Traditional Chinese (繁體中文).
-5.  **Subject Relevance:** All questions must be strictly relevant to the main subject of the document.
-
-**--- INPUTS ---**
-- **Overall User Query:** {query}
-- **Current Task:** {task_details}
-- **Retrieved Content:**
-{combined_retrieved_text}
-- **Images:** [Images are provided if available]
-
-**--- OUTPUT FORMAT ---**
-Please format your output EXACTLY as follows for each question (do not use markdown code blocks):
-
-[Question Number]. [Question Text]
-(A) [Option A]
-(B) [Option B]
-(C) [Option C]
-(D) [Option D]
----
-**答案:** [Correct Answer Letter, e.g., A]
-**出處:** [Page Number], [佐證該答案的關鍵原文或理由]
----
-"""
-
-SA_PROMPT_TEMPLATE = """You are a professional university professor (您是一位專業的大學教師) designing an exam. Your task is to generate high-quality short-answer questions based on the provided text content and images.
-
-**--- CRITICAL PRINCIPLES ---**
-1.  **Must Provide Answer:** Every question must have a sample correct answer.
-2.  **Must Cite Source with Evidence:** DO NOT just provide the page number. You MUST include the **Page Number** AND a **brief quote or explanation** from the text that supports why the answer is correct.
-    - **Wrong Example:** "**出處:** 第 5 頁"
-    - **Correct Example:** "**出處:** 第 5 頁，文中提到 '粒線體是細胞的發電廠'。"
-3.  **Clean and Contextualize the Evidence:** The quoted text must be cleaned. Remove any formatting artifacts (like '○', bullet points, etc.). Ensure it forms a complete, coherent sentence or phrase that provides sufficient context for the answer, even if the question implies part of the context.
-4.  **Language:** All output must be in Traditional Chinese (繁體中文).
-5.  **Subject Relevance:** All questions must be strictly relevant to the main subject of the document.
-
-**--- INPUTS ---**
-- **Overall User Query:** {query}
-- **Current Task:** {task_details}
-- **Retrieved Content:**
-{combined_retrieved_text}
-- **Images:** [Images are provided if available]
-
-**--- OUTPUT FORMAT ---**
-Please format your output EXACTLY as follows for each question (do not use markdown code blocks):
-
-[Question Number]. [Question Text]
----
-**參考答案:** [A detailed sample answer]
-**出處:** [Page Number], [佐證該答案的關鍵原文或理由]
----
-"""
-
-TF_PROMPT_TEMPLATE = """You are a professional university professor (您是一位專業的大學教師) designing an exam. Your task is to generate high-quality true/false questions based on the provided text content and images.
-
-**--- CRITICAL PRINCIPLES ---**
-1.  **Must Provide Correct Answer:** Every question must have a clearly indicated correct answer (True or False).
-2.  **Must Cite Source with Evidence:** DO NOT just provide the page number. You MUST include the **Page Number** AND a **brief quote or explanation** from the text that supports why the answer is True or False.
-    - **Wrong Example:** "**出處:** 第 17 頁"
-    - **Correct Example:** "**出處:** 第 17 頁，文中提到正規化是將數值縮放到 [0, 1] 區間。"
-3.  **Clean and Contextualize the Evidence:** The quoted text must be cleaned. Remove any formatting artifacts (like '○', bullet points, etc.). Ensure it forms a complete, coherent sentence or phrase that provides sufficient context for the answer, even if the question implies part of the context.
-4.  **Language:** All output must be in Traditional Chinese (繁體中文).
-5.  **Subject Relevance:** All questions must be strictly relevant to the main subject of the document.
-
-**--- INPUTS ---**
-- **Overall User Query:** {query}
-- **Current Task:** {task_details}
-- **Retrieved Content:**
-{combined_retrieved_text}
-- **Images:** [Images are provided if available]
-
-**--- OUTPUT FORMAT ---**
-Please format your output EXACTLY as follows for each question (do not use markdown code blocks):
-
-[Question Number]. [Statement Text]
----
-**答案:** [True/False]
-**出處:** [Page Number], [佐證該答案的關鍵原文或理由]
----
-"""
-
-def _generic_generate_question(state: ExamGenerationState, prompt_template: str, task_type_name: str) -> ExamGenerationState:
-    """A generic function that handles question generation for a given task type."""
+def _generic_generate_question(state: ExamGenerationState, task_type_name: str) -> ExamGenerationState:
+    """A generic function that handles question generation for a given task type using LLM function calling."""
     current_task = state.get("current_task", {})
     
-    # Get LLM details here to log them at task creation
     llm = get_llm()
     model_params = {"temperature": llm.temperature}
 
@@ -300,17 +251,75 @@ def _generic_generate_question(state: ExamGenerationState, prompt_template: str,
         model_parameters=model_params
     )
     start_time = time.perf_counter()
+
     try:
         task_details = f"Task: Generate {current_task.get('count', 1)} {task_type_name.replace('_', ' ')} question(s)"
         if current_task.get('topic'):
             task_details += f" about '{current_task.get('topic')}'"
 
         combined_retrieved_text, image_data_urls = _prepare_multimodal_content(state["retrieved_page_content"])
-        final_prompt = prompt_template.format(query=state['query'], task_details=task_details, combined_retrieved_text=combined_retrieved_text)
         
-        response = call_openai_api(llm, final_prompt, image_data_urls)
-        generated_part = response.content
-        state["final_generated_content"].append(generated_part)
+        system_message_content = "You are a professional university professor (您是一位專業的大學教師) designing an exam. Your task is to generate high-quality questions based on the provided text content and images. You MUST use the provided tool to output the questions."
+        
+        human_message_content = [
+            {"type": "text", "text": f"**--- CRITICAL PRINCIPLES ---**\n"},
+            {"type": "text", "text": f"1.  **Must Provide Correct Answer:** Every question must have a clearly indicated correct answer.\n"},
+            {"type": "text", "text": f"2.  **Must Cite Source with Evidence:** You MUST include the **Page Number** AND a **brief quote or explanation** from the text that supports why the answer is correct.\n"},
+            {"type": "text", "text": f"3.  **Clean and Contextualize the Evidence:** The quoted text must be cleaned. Remove any formatting artifacts (like '○', bullet points, etc.). Ensure it forms a complete, coherent sentence or phrase that provides sufficient context for the answer, even if the question implies part of the context.\n"},
+            {"type": "text", "text": f"4.  **Language:** All output must be in Traditional Chinese (繁體中文).\n"},
+            {"type": "text", "text": f"5.  **Subject Relevance:** All questions must be strictly relevant to the main subject of the document.\n"},
+            {"type": "text", "text": f"\n**--- INPUTS ---**\n"},
+            {"type": "text", "text": f"- **Overall User Query:** {state['query']}\n"},
+            {"type": "text", "text": f"- **Current Task:** {task_details}\n"},
+            {"type": "text", "text": f"- **Retrieved Content:**\n{combined_retrieved_text}\n"},
+            {"type": "text", "text": f"- **Images:** [Images are provided if available]\n"}
+        ]
+
+        if task_type_name == "multiple_choice":
+            human_message_content.append({"type": "text", "text": f"\n**--- MULTIPLE CHOICE SPECIFIC INSTRUCTIONS ---**\n"})
+            human_message_content.append({"type": "text", "text": f"For multiple-choice questions, you MUST provide exactly four options (A, B, C, D) for each question. This is CRITICAL. The 'options' field in the tool MUST be a dictionary with keys 'A', 'B', 'C', 'D' and their corresponding text values. DO NOT OMIT THE 'OPTIONS' FIELD. Each question requires the 'options' dictionary with four choices.\n"})
+            human_message_content.append({"type": "text", "text": f"\n**--- EXAMPLE MULTIPLE CHOICE QUESTION JSON ---**\n"})
+            human_message_content.append({"type": "text", "text": f"```json\n{{\n  \"questions\": [\n    {{\n      \"question_number\": 1,\n      \"question_text\": \"以下哪項是地球上最豐富的氣體？\",\n      \"options\": {{\n        \"A\": \"氧氣\",\n        \"B\": \"氮氣\",\n        \"C\": \"二氧化碳\",\n        \"D\": \"氫氣\"\n      }},\n      \"correct_answer\": \"B\",\n      \"source\": {{\n        \"page_number\": \"10\",\n        \"evidence\": \"地球大氣層約有78%是氮氣。\"\n      }}\n    }}\n  ]\n}}\n```\n"})
+
+        if image_data_urls:
+            for image_uri in image_data_urls:
+                human_message_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": image_uri, "detail": "low"}
+                })
+
+        messages = [
+            SystemMessage(content=system_message_content),
+            HumanMessage(content=human_message_content)
+        ]
+
+        # Select the appropriate Pydantic model for tool binding
+        tool_model = None
+        if task_type_name == "multiple_choice":
+            tool_model = MultipleChoiceQuestionsList
+        elif task_type_name == "true_false":
+            tool_model = TrueFalseQuestionsList
+        elif task_type_name == "short_answer":
+            tool_model = ShortAnswerQuestionsList
+        else:
+            raise ValueError(f"Unsupported task type: {task_type_name}")
+
+        # Bind the tool to the LLM
+        tool_llm = llm.bind_tools(tools=[tool_model], tool_choice={"type": "function", "function": {"name": tool_model.__name__}})
+        response = tool_llm.invoke(messages)
+        
+        if not response.tool_calls:
+            raise ValueError("The model did not call the required tool to generate questions.")
+            
+        # Extract the questions from the tool call
+        generated_questions_list = tool_model(**response.tool_calls[0]['args'])
+        
+        # Store the list of question dictionaries in final_generated_content
+        # Convert Pydantic models to dictionaries for storage
+        state["final_generated_content"].append({
+            "type": task_type_name,
+            "questions": [q.model_dump() for q in generated_questions_list.questions]
+        })
         
         # --- Log tokens and cost ---
         token_usage = response.response_metadata.get("token_usage", {})
@@ -321,15 +330,15 @@ def _generic_generate_question(state: ExamGenerationState, prompt_template: str,
         pricing = MODEL_PRICING.get(model_name, {"input": 0, "output": 0})
         estimated_cost = ((prompt_tokens / 1_000_000) * pricing["input"]) + ((completion_tokens / 1_000_000) * pricing["output"])
 
-        # Save the generated content to the database
+        # Save the generated content to the database (as JSON string)
         title = f"Generated {current_task.get('count', 1)} {task_type_name.replace('_', ' ')} questions"
-        db_logger.save_generated_content(task_id, task_type_name, title, generated_part)
+        db_logger.save_generated_content(task_id, task_type_name, title, json.dumps(generated_questions_list.model_dump(), ensure_ascii=False, indent=2))
         
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db_logger.update_task(
             task_id, 
             'completed', 
-            generated_part, 
+            generated_questions_list.model_dump(), # Pass the actual dict
             duration_ms=duration_ms,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
@@ -337,21 +346,112 @@ def _generic_generate_question(state: ExamGenerationState, prompt_template: str,
         )
     except Exception as e:
         state["error"] = f"Error in {task_type_name} generation: {str(e)}"
+        state["generation_errors"].append({"task_type": task_type_name, "error_message": str(e), "task_input": current_task})
         duration_ms = int((time.perf_counter() - start_time) * 1000)
         db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
     return state
 
 def generate_multiple_choice_node(state: ExamGenerationState) -> ExamGenerationState:
-    return _generic_generate_question(state, MC_PROMPT_TEMPLATE, "multiple_choice")
+    return _generic_generate_question(state, "multiple_choice")
 
 def generate_short_answer_node(state: ExamGenerationState) -> ExamGenerationState:
-    return _generic_generate_question(state, SA_PROMPT_TEMPLATE, "short_answer")
+    return _generic_generate_question(state, "short_answer")
 
 def generate_true_false_node(state: ExamGenerationState) -> ExamGenerationState:
-    return _generic_generate_question(state, TF_PROMPT_TEMPLATE, "true_false")
+    return _generic_generate_question(state, "true_false")
 
 def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
     """Handles any errors that occurred during the process."""
     # This error is now logged at the node where it occurred.
     # This node is primarily for graph control flow.
+    return state
+
+def aggregate_final_output_node(state: ExamGenerationState) -> ExamGenerationState:
+    """
+    Aggregates all generated content (which are now structured JSON objects) into a single
+    structured JSON object, saves it to the database, and updates the job's final_output_id.
+    Also generates a title for the aggregated content.
+    """
+    job_id = state['job_id']
+    duration_ms = 0 # Initialize duration_ms
+
+    task_id = db_logger.create_task(
+        job_id,
+        "aggregate_final_output",
+        "Aggregating all generated exam content into a final structured output.",
+        parent_task_id=state.get("parent_task_id"),
+        task_input={"query": state["query"], "aggregated_item_count": len(state["final_generated_content"])}
+    )
+    start_time = time.perf_counter()
+
+    aggregated_output = []
+    
+    try:
+        for content_item in state["final_generated_content"]:
+            # content_item is expected to be a dictionary like {"type": "multiple_choice", "questions": [...]}
+            if isinstance(content_item, dict) and "type" in content_item and "questions" in content_item:
+                aggregated_output.append(content_item)
+            else:
+                # Fallback for any unexpected format, though with tool calling, this should be rare
+                aggregated_output.append({
+                    "type": "unstructured_content",
+                    "content": content_item # Store as is if not structured
+                })
+
+        # Generate a title for the aggregated content
+        # Example: "Exam based on 'User Query' - [Date]"
+        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
+        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
+
+        # Add generation errors to the aggregated output if any
+        if state["generation_errors"]:
+            aggregated_output.insert(0, { # Insert at the beginning for prominence
+                "type": "generation_warnings",
+                "message": "Some question types failed to generate. Please check the details below.",
+                "errors": state["generation_errors"]
+            })
+        
+        # Convert the aggregated output to a JSON string
+        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
+
+        # Save the final aggregated content to the database
+        final_content_id = db_logger.save_generated_content(
+            task_id,
+            "final_exam_output",
+            generated_title,
+            final_json_output
+        )
+
+        if final_content_id:
+            db_logger.update_job_final_output(job_id, final_content_id)
+            # Update state with the actual aggregated output (parsed JSON object)
+            state["final_generated_content"] = aggregated_output
+        else:
+            raise Exception("Failed to save final aggregated content.")
+
+        # Determine final job status
+        job_status = 'completed'
+        if state["generation_errors"]:
+            if aggregated_output and len(aggregated_output) > 1: # More than just the warning message
+                job_status = 'partial_success'
+            else:
+                job_status = 'failed'
+        
+        duration_ms = int((time.perf_counter() - start_time) * 1000) # Define duration_ms here
+        db_logger.update_task(task_id, job_status, json.loads(final_json_output), duration_ms=duration_ms)
+
+    except Exception as e:
+        state["error"] = f"Error aggregating final output: {str(e)}"
+        state["generation_errors"].append({"task": "aggregate_final_output", "error_message": str(e)})
+        job_status = 'failed'
+        db_logger.update_task(task_id, job_status, error_message=str(e), duration_ms=duration_ms) # Use initialized duration_ms
+    
+    # Update the main job status based on the overall outcome
+    if job_status == 'failed':
+        db_logger.update_job_status(job_id, 'failed', error_message=state["error"])
+    elif job_status == 'partial_success':
+        db_logger.update_job_status(job_id, 'partial_success', error_message="Some generation tasks failed.")
+    else:
+        db_logger.update_job_status(job_id, 'completed')
+
     return state
