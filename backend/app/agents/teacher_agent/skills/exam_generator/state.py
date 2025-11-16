@@ -13,5 +13,6 @@ class ExamGenerationState(TypedDict):
     generation_plan: List[Dict[str, Any]]
     current_task: Optional[Dict[str, Any]]
     final_generated_content: List[str]
+    generation_errors: List[Dict[str, Any]] # New field to store errors from individual generation tasks
     error: Optional[str]
     parent_task_id: Optional[int] # The ID of the parent task for hierarchical logging

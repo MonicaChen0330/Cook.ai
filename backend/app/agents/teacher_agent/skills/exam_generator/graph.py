@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 from .state import ExamGenerationState
+from backend.app.utils import db_logger # Import db_logger
 
 load_dotenv()
 
@@ -14,6 +15,7 @@ from .exam_nodes import (
     generate_multiple_choice_node,
     generate_short_answer_node,
     generate_true_false_node,
+    aggregate_final_output_node, # Import the new aggregation node
     handle_error_node,
 )
 
@@ -27,6 +29,7 @@ workflow.add_node("prepare_next_task", prepare_next_task_node) # Add the new nod
 workflow.add_node("generate_multiple_choice", generate_multiple_choice_node)
 workflow.add_node("generate_short_answer", generate_short_answer_node)
 workflow.add_node("generate_true_false", generate_true_false_node)
+workflow.add_node("aggregate_final_output", aggregate_final_output_node) # Add the new aggregation node
 workflow.add_node("handle_error", handle_error_node)
 
 # --- Define the new graph structure ---
@@ -45,7 +48,7 @@ workflow.add_conditional_edges(
         "generate_short_answer": "generate_short_answer",
         "generate_true_false": "generate_true_false",
         "handle_error": "handle_error",
-        "end": END
+        "end": "aggregate_final_output" # Point to the aggregation node
     }
 )
 
@@ -53,6 +56,9 @@ workflow.add_conditional_edges(
 workflow.add_edge('generate_multiple_choice', 'prepare_next_task')
 workflow.add_edge('generate_short_answer', 'prepare_next_task')
 workflow.add_edge('generate_true_false', 'prepare_next_task')
+
+# The aggregation node leads to the end
+workflow.add_edge('aggregate_final_output', END)
 
 # The error node leads to the end
 workflow.add_edge('handle_error', END)

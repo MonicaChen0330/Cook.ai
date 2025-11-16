@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, MetaData, Table, insert, update, select, f
 from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
+import json
 
 # --- Timezone and Database Setup ---
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -85,6 +86,20 @@ def update_job_status(job_id: int, status: str, error_message: Optional[str] = N
     except Exception as e:
         print(f"[DB Logger] ERROR: Failed to update job {job_id}. Reason: {e}")
 
+def update_job_final_output(job_id: int, final_output_id: int):
+    """Updates the final_output_id of a job."""
+    try:
+        with engine.connect() as conn:
+            stmt = update(orchestration_jobs).where(orchestration_jobs.c.id == job_id).values(
+                final_output_id=final_output_id,
+                updated_at=datetime.now(TAIPEI_TZ)
+            )
+            conn.execute(stmt)
+            conn.commit()
+            print(f"[DB Logger] Updated job {job_id} with final_output_id: {final_output_id}.")
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to update job {job_id} final_output_id. Reason: {e}")
+
 # --- Task-level Logging ---
 
 def create_task(job_id: int, agent_name: str, task_description: str, task_input: Optional[Dict] = None, model_name: Optional[str] = None, parent_task_id: Optional[int] = None, model_parameters: Optional[Dict] = None) -> Optional[int]:
@@ -114,7 +129,7 @@ def create_task(job_id: int, agent_name: str, task_description: str, task_input:
 def update_task(
     task_id: int,
     status: str,
-    output: Optional[str] = None,
+    output: Optional[Any] = None, # Changed type hint to Any
     error_message: Optional[str] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
@@ -124,9 +139,21 @@ def update_task(
     """Updates an agent_task record upon completion or failure."""
     try:
         with engine.connect() as conn:
+            processed_output = None
+            if output is not None:
+                if isinstance(output, (dict, list)):
+                    processed_output = output
+                elif isinstance(output, str):
+                    try:
+                        processed_output = json.loads(output)
+                    except json.JSONDecodeError:
+                        processed_output = {"text_output": output} # Wrap plain strings
+                else:
+                    processed_output = {"value": str(output)} # Catch all other types
+
             values_to_update = {
                 "status": status,
-                "output": str(output) if output is not None else None,
+                "output": processed_output, # Use the processed output
                 "error_message": error_message,
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -180,14 +207,14 @@ def save_generated_content(task_id: int, content_type: str, title: str, content:
     """Saves generated content to the GENERATED_CONTENTS table."""
     try:
         with engine.connect() as conn:
-            # The 'content' column in the DB is JSON, so we wrap the string output
-            json_content = {"text_output": content}
+            # The 'content' column in the DB is JSON. Parse the incoming JSON string.
+            parsed_content = json.loads(content)
             
             stmt = insert(generated_contents).values(
                 source_agent_task_id=task_id,
                 content_type=content_type,
                 title=title,
-                content=json_content,
+                content=parsed_content, # Store the parsed JSON object directly
                 created_at=datetime.now(TAIPEI_TZ),
                 updated_at=datetime.now(TAIPEI_TZ)
             ).returning(generated_contents.c.id)
