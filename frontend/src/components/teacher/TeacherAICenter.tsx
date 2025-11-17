@@ -1,56 +1,98 @@
-// frontend/src/components/teacher/TeacherAICenter.jsx
-import { useState } from 'react';
-import { FaSearch, FaYoutube, FaFileAlt, FaEnvelope } from 'react-icons/fa';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import SourcePanel from './SourcePanel';
+import ChatInterface from './ChatInterface';
 
-function TeacherAICenter() {
-  const [prompt, setPrompt] = useState('');
-  const userName = "Ms. Chen"; // 假資料
+export type Source = {
+  id: string;
+  name: string;
+  unique_content_id: number;
+};
 
-  const handlePromptChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setPrompt(e.target.value);
+const TeacherAICenter: React.FC = () => {
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [panelWidth, setPanelWidth] = useState(320);
+  const isResizing = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null); // Ref for the main container
+
+  const fetchSources = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/materials?course_id=1');
+      if (!response.ok) {
+        throw new Error('Failed to fetch sources');
+      }
+              const data = await response.json();
+              setSources(data.map((item: any) => ({
+                id: String(item.id),
+                name: item.file_name, // Explicitly map file_name to name
+                unique_content_id: item.unique_content_id
+              })));
+            } catch (error) {
+              console.error("Error fetching sources:", error);
+            }
+          }, []);
+  useEffect(() => {
+    fetchSources();
+  }, [fetchSources]);
+
+  const handleSelectSource = (sourceId: string) => {
+    setSelectedSources(prev =>
+      prev.includes(sourceId)
+        ? prev.filter(id => id !== sourceId)
+        : [...prev, sourceId]
+    );
   };
 
-  const handleChipClick = (suggestion: string) => {
-    setPrompt(suggestion);
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
   };
 
-  const suggestions = [
-    { icon: <FaFileAlt />, text: '產生隨堂練習' },
-    { icon: <FaEnvelope />, text: '撰寫公告並發送郵件給學生' },
-    { icon: <FaYoutube />, text: '根據教學影片內容出題' },
-  ];
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing.current || !containerRef.current) return;
+    
+    // --- Bug Fix: Calculate width relative to the container ---
+    const containerStart = containerRef.current.getBoundingClientRect().left;
+    const newWidth = e.clientX - containerStart;
+
+    if (newWidth > 90 && newWidth < 600) { // Min 80px, Max 600px
+      setPanelWidth(newWidth);
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    isResizing.current = false;
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', handleMouseUp);
+  }, [handleMouseMove]);
 
   return (
-    <div className="w-full max-w-3xl mx-auto my-16 text-center">
-      <div className="inline-flex items-center gap-4 mb-8">
-        <div className="text-3xl text-blue-500">✨</div> {/* Using a div for the sparkle icon as it was a character */} 
-        <h2 className="m-0 text-3xl font-bold text-gray-800">嗨 {userName}，您需要甚麼教學上的幫助?</h2>
-      </div>
-
-      <div className="relative mb-6">
-        <FaSearch className="absolute left-6 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input
-          type="text"
-          placeholder="輸入您的指令製作教材或查詢任何問題..."
-          className="w-full py-4 pl-14 pr-4 text-lg border border-gray-300 rounded-full shadow-md transition-all duration-200 ease-in-out focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-200"
-          value={prompt}
-          onChange={handlePromptChange}
+    <div className="flex w-full h-full bg-white" ref={containerRef}>
+      <div style={{ width: `${panelWidth}px` }} className="flex-shrink-0 h-full">
+        <SourcePanel
+          availableSources={sources}
+          selectedSources={selectedSources}
+          onSelectSource={handleSelectSource}
+          onUploadSuccess={fetchSources}
         />
       </div>
 
-      <div className="flex justify-center gap-4 flex-wrap">
-        {suggestions.map((suggestion, index) => (
-          <div
-            key={index}
-            className="inline-flex items-center gap-2 bg-white border border-gray-300 py-2.5 px-4 rounded-full text-sm cursor-pointer transition-all duration-200 ease-in-out hover:bg-gray-100 hover:border-blue-500 hover:text-blue-500"
-            onClick={() => handleChipClick(suggestion.text)}
-          >
-            {suggestion.icon} {suggestion.text}
-          </div>
-        ))}
+      <div 
+        className="w-2 h-full cursor-col-resize flex items-center justify-center group"
+        onMouseDown={handleMouseDown}
+      >
+        <div className="w-px h-16 bg-neutral-border rounded-full group-hover:bg-theme-primary transition-colors"></div>
       </div>
+
+      <main className="flex-1 h-full min-w-0">
+        <ChatInterface 
+          selectedSourceIds={selectedSources} 
+        />
+      </main>
     </div>
   );
-}
+};
 
 export default TeacherAICenter;

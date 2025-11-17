@@ -1,103 +1,44 @@
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
-
-:root {
-  /* 主題色 */
-  --primary-color: #4A90E2; 
-  --primary-color-hover: #357ABD;
-  --primary-color-dark: #4343e6; 
-  --primary-gradient: linear-gradient(90deg, #4343e6 0%, #81C7F5 100%);
-
-  /* 文字顏色 */
-  --text-color: #212529; 
-  --text-color-light: #495057;
-  --text-color-muted: #6C757D;
-
-  /* 背景與邊框 */
-  --background-color: #F8F9FA;
-  --card-background: #FFFFFF;
-  --border-color: #DEE2E6; 
-
-  /* 其他 */
-  --box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
-  --border-radius: 8px; 
-}
+/* 載入字體 */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;800&display=swap');
 
 html, body, #root {
+  height: 100%;
   margin: 0;
   padding: 0;
-  height: 100%;
-  width: 100%;
-  box-sizing: border-box;
-  font-family: 'Noto Sans TC', system-ui, sans-serif; 
-  background-color: var(--background-color);
-  color: var(--text-color);
 }
 
-/* Tailwind directives should come after global base styles */
+#root {
+  height: 100%;
+  width: 100%; /* Keep width 100% for #root */
+  box-sizing: border-box; /* Keep box-sizing for #root */
+}
+
+/* 載入 Tailwind，自動處理所有基礎樣式) */
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* The rest of the original index.css content that is not covered by Tailwind or variables */
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
-}
 
+/* 全域設定字體樣式 */
 body {
-  margin: 0;
+  @apply text-neutral-text-main font-normal;
 }
 
 h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+  @apply text-[3.2em] leading-[1.1] font-bold text-neutral-text-main;
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+h2 {
+  @apply text-2xl font-bold text-neutral-text-main;
 }
 
-/* 共用的頁面佈局，用於將 Footer 推至底部 */
-.page-wrapper {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
+h3 {
+  @apply text-xl font-semibold text-neutral-text-main;
 }
 
-.page-content {
-  flex-grow: 1;
-  display: flex;
-  flex-direction: column
+a {
+  @apply font-medium text-theme-primary transition-colors;
 }
-
- @media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
+a:hover {
+  @apply text-theme-primary-hover;
 }
