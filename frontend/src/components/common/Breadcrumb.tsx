@@ -16,14 +16,17 @@ function Breadcrumb({ paths }: BreadcrumbProps) {
         {paths.map((path, index) => (
           <li key={index} className="flex items-center">
             {path.path ? (
-              <Link to={path.path} className="text-blue-500 no-underline transition-colors hover:underline">
+              <Link 
+                to={path.path} 
+                className="text-theme-primary no-underline transition-colors hover:text-theme-primary-hover hover:underline"
+              >
                 {path.name}
               </Link>
             ) : (
-              <span className="text-gray-600">{path.name}</span>
+              <span className="text-neutral-text-main font-medium">{path.name}</span>
             )}
             {index < paths.length - 1 && (
-              <span className="ml-2 text-gray-400">/</span>
+              <span className="ml-2 text-neutral-text-light">/</span>
             )}
           </li>
         ))}

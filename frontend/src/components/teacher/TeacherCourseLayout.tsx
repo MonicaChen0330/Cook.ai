@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { Outlet, useParams, useOutletContext } from 'react-router-dom';
 import TeacherSidebar from './TeacherSidebar';
 
@@ -12,6 +12,14 @@ function TeacherCourseLayout() {
   const { courseId } = useParams();
   const context = useOutletContext<OutletContext>(); // Get the entire context object
 
+  // 1. 在這裡建立 "狀態"，預設為開啟 (true)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+
+  // 2. 這是切換狀態的函式
+  const toggleSidebar = () => {
+    setIsSidebarOpen(!isSidebarOpen);
+  };
+
   useEffect(() => {
     if (context.setBreadcrumbPaths && courseId) {
       context.setBreadcrumbPaths([
@@ -22,9 +30,14 @@ function TeacherCourseLayout() {
   }, [courseId, context.setBreadcrumbPaths]);
 
   return (
-    <div className="flex flex-grow overflow-hidden">
-      <TeacherSidebar courseId={courseId} />
-      <main className="flex-grow p-8 overflow-y-auto flex justify-center items-center">
+    <div className="flex h-full bg-white">
+      {/* 4. 將狀態和函式 "傳遞" 給 TeacherSidebar */}
+      <TeacherSidebar 
+        isSidebarOpen={isSidebarOpen} 
+        onToggle={toggleSidebar} 
+        courseId={courseId}
+      />
+      <main className="flex-1 overflow-y-auto bg-white">
         <Outlet context={context} /> {/* Pass the context down here */}
       </main>
     </div>

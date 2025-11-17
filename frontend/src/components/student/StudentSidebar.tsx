@@ -10,7 +10,7 @@ function StudentSidebar({ courseId }: StudentSidebarProps) {
   const baseCoursePath = courseId ? `/student/course/${courseId}` : '/student';
 
   return (
-    <aside className="w-72 bg-white border-r border-gray-200 py-6 flex-shrink-0">
+    <aside className="w-50 bg-white border-r border-gray-200 py-6 flex-shrink-0">
       <div className="px-6">
         <h3 className="text-lg font-bold text-gray-800 mb-6 px-4">學生功能</h3>
         <nav>

@@ -20,9 +20,9 @@ function Teacher() {
   const [breadcrumbPaths, setBreadcrumbPaths] = useState<BreadcrumbPath[] | null>(null);
 
   return (
-    <div className="page-wrapper">
+    <div className="flex flex-col h-screen">
       <Header paths={breadcrumbPaths} />
-      <main className="page-content">
+      <main className="flex-1 overflow-y-auto">
         {/* 將 state 和 setter 傳遞下去，並指定 context 型別 */}
         <Outlet context={{ setBreadcrumbPaths, breadcrumbPaths } as OutletContext} />
       </main>
