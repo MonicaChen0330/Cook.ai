@@ -1,16 +1,19 @@
 import os
 import shutil
 import tempfile
-from typing import Any
+from typing import Any, List
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field # Import Field
 from starlette.concurrency import run_in_threadpool
 import json # Import json
+from fastapi.middleware.cors import CORSMiddleware
 
 # Correctly import the refactored modules
 from backend.app.agents.teacher_agent.ingestion import process_file
 from backend.app.agents.teacher_agent.graph import app as teacher_agent_app
 from backend.app.utils import db_logger
+from backend.app.utils.db_logger import engine, metadata # Import engine and metadata
+from sqlalchemy import Table, select, update # Import sqlalchemy functions
 
 # Create the FastAPI app
 app = FastAPI(
@@ -18,57 +21,243 @@ app = FastAPI(
     description="API for ingesting documents and generating educational materials.",
 )
 
+# --- Add CORS Middleware ---
+# This allows the frontend (running on localhost:3001) to communicate with the backend.
+origins = [
+    "http://localhost:3001", # Confirmed Vite dev server port
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # --- API Models ---
 
 class IngestResponse(BaseModel):
+
     unique_content_id: int
+
+    file_name: str # ⬅️ Add this field for instant UI updates
+
     message: str
 
+
+
 class GenerateExamRequest(BaseModel):
+
     unique_content_id: int
+
     prompt: str
+
     user_id: int = 1 # Default mock user ID
 
+
+
 class GenerateExamResponse(BaseModel):
+
     job_id: int
+
     result: Any # This will now be the parsed JSON object
+
+
+
+class Material(BaseModel):
+
+    id: int
+
+    name: str = Field(alias='file_name') # Let frontend use 'name', backend use 'file_name'
+
+    unique_content_id: int
+
+
+
+class UpdateMaterialRequest(BaseModel):
+
+    name: str
+
+
+
+# --- Reflect 'materials' table ---
+
+try:
+
+    materials_table = Table('materials', metadata, autoload_with=engine)
+
+except Exception as e:
+
+    print(f"Error reflecting 'materials' table: {e}")
+
+    # Define a fallback if reflection fails, to allow server to start
+
+    materials_table = None
+
+
 
 # --- API Endpoints ---
 
+
+# 輸入course_id，撈回該課堂所有unique_material_data
+@app.get("/api/materials", response_model=List[Material])
+
+async def get_materials(course_id: int):
+    """
+    Endpoint to get all materials for a given course.
+    """
+    print(f"[DIAGNOSTIC] /api/materials called with course_id: {course_id}") # LOGGING
+    if materials_table is None:
+
+        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
+
+    query = select(materials_table).where(materials_table.c.course_id == course_id)
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+            print(f"[DIAGNOSTIC] Database query returned {len(rows)} rows.") # LOGGING
+            
+            material_list = []
+            for row in rows:
+                print(f"[DIAGNOSTIC] Material ID: {row.id}, File Name: '{row.file_name}'") # DETAILED LOGGING
+                material_list.append({
+                    "id": row.id, 
+                    "file_name": row.file_name,
+                    "unique_content_id": row.unique_content_id
+                })
+            return material_list
+            
+    except Exception as e:
+        print(f"[DIAGNOSTIC] An exception occurred: {e}") # LOGGING
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+
+
+@app.patch("/api/materials/{material_id}", status_code=204)
+
+async def update_material_name(material_id: int, request: UpdateMaterialRequest):
+
+    """
+
+    Endpoint to update the name of a material.
+
+    """
+
+    if materials_table is None:
+
+        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
+
+
+
+    stmt = (
+
+        update(materials_table)
+
+        .where(materials_table.c.id == material_id)
+
+        .values(file_name=request.name)
+
+    )
+
+    try:
+
+        with engine.connect() as conn:
+
+            result = conn.execute(stmt)
+
+            if result.rowcount == 0:
+
+                raise HTTPException(status_code=404, detail=f"Material with id {material_id} not found.")
+
+            conn.commit()
+
+        return
+
+    except HTTPException:
+
+        raise # Re-raise HTTPException
+
+    except Exception as e:
+
+        raise HTTPException(status_code=500, detail=f"Database update failed: {e}")
+
+
+
+
+
 @app.post("/api/ingest", response_model=IngestResponse)
+
 async def ingest_document(
+
     course_id: int = Form(1),
+
     uploader_id: int = Form(1),
+
     file: UploadFile = File(...)
+
 ):
+
     """
+
     Endpoint to ingest a document. This is a teacher-specific action.
+
     Receives a file, saves it temporarily, and processes it using the ingestion service.
+
     """
+
     with tempfile.TemporaryDirectory() as temp_dir:
+
         file_path = os.path.join(temp_dir, file.filename)
+
         
+
         with open(file_path, "wb") as buffer:
+
             shutil.copyfileobj(file.file, buffer)
+
         
+
         print(f"File '{file.filename}' saved to temporary path: {file_path}")
 
+
+
         # The ingestion process is synchronous but involves I/O.
+
         # Running it in a thread pool is good practice for an async server.
+
         unique_content_id = await run_in_threadpool(
+
             process_file,
+
             file_path=file_path,
+
             uploader_id=uploader_id,
+
             course_id=course_id,
+
             force_reprocess=False
+
         )
 
+
+
     if unique_content_id is None:
+
         raise HTTPException(status_code=500, detail="Failed to process the document.")
 
+
+
     return IngestResponse(
+
         unique_content_id=unique_content_id,
+
+        file_name=file.filename, # ⬅️ Return the original filename
+
         message=f"Successfully ingested file '{file.filename}'."
+
     )
 
 @app.post("/api/generate_exam", response_model=GenerateExamResponse)

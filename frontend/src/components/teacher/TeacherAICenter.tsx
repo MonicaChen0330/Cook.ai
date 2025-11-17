@@ -1,60 +1,91 @@
-import React, { useState } from 'react';
-// 稍後我們將建立這兩個新組件
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import SourcePanel from './SourcePanel';
 import ChatInterface from './ChatInterface';
 
-// 假設這是你的 Source 資料結構 (你未來會從 API 取得)
 export type Source = {
-  id: string; // 唯一的 UUID
-  name: string; // 顯示的檔案名稱
+  id: string;
+  name: string;
+  unique_content_id: number;
 };
 
 const TeacherAICenter: React.FC = () => {
-  // 1. 狀態：管理來源面板是否開啟，預設為 true
-  const [isPanelOpen, setIsPanelOpen] = useState(true);
-
-  // 2. 狀態：管理老師勾選了哪些來源 (儲存 ID)
   const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [sources, setSources] = useState<Source[]>([]);
+  const [panelWidth, setPanelWidth] = useState(320);
+  const isResizing = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null); // Ref for the main container
 
-  // 模擬的來源資料 (之後請替換成 API 呼叫)
-  const DUMMY_SOURCES: Source[] = [
-    { id: 'uuid-source-1', name: '1_Agentic_AI_Autonomo...' },
-    { id: 'uuid-source-2', name: '2_Viability_into_AI_Agent...' },
-    { id: 'uuid-source-3', name: '3_AGENTPEERTALK_Em...' },
-    { id: 'uuid-source-4', name: '6_Agentic_Systems_A_Gu...' },
-  ];
+  const fetchSources = useCallback(async () => {
+    try {
+      const response = await fetch('http://localhost:8000/api/materials?course_id=1');
+      if (!response.ok) {
+        throw new Error('Failed to fetch sources');
+      }
+              const data = await response.json();
+              setSources(data.map((item: any) => ({
+                id: String(item.id),
+                name: item.file_name, // Explicitly map file_name to name
+                unique_content_id: item.unique_content_id
+              })));
+            } catch (error) {
+              console.error("Error fetching sources:", error);
+            }
+          }, []);
+  useEffect(() => {
+    fetchSources();
+  }, [fetchSources]);
 
-  // 處理來源勾選的函式
   const handleSelectSource = (sourceId: string) => {
     setSelectedSources(prev =>
       prev.includes(sourceId)
-        ? prev.filter(id => id !== sourceId) // 如果已經選了，就取消
-        : [...prev, sourceId] // 否則就加入
+        ? prev.filter(id => id !== sourceId)
+        : [...prev, sourceId]
     );
   };
 
-  return (
-    // -----  這裡是主要的修改點 -----
-    // 1. 加上 "bg-white"：這會把整個底色變成你想要的乾淨白色
-    // 2. 加上 "p-4" (padding)：在整個容器周圍加上一點邊距
-    // 3. 加上 "space-x-4"：在 SourcePanel 和 ChatInterface 之間創造間距
-    <div className="flex w-full h-full p-4 space-x-4 bg-white">
-      
-      {/* 1. 來源面板 (SourcePanel) */}
-      {/* 我們仍然傳遞 props，但 SourcePanel 稍後需要被修改，
-        讓它變成一個有 'shadow' 和 'rounded-lg' 的浮動卡片
-      */}
-      <SourcePanel
-        isOpen={isPanelOpen}
-        onToggle={() => setIsPanelOpen(!isPanelOpen)}
-        availableSources={DUMMY_SOURCES}
-        selectedSources={selectedSources}
-        onSelectSource={handleSelectSource}
-      />
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    isResizing.current = true;
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
 
-      {/* 2. 聊天介面 (ChatInterface) */}
-      {/* flex-1 讓它自動填滿所有剩餘空間 */}
-      {/* min-w-0 解決 flex 內容溢出的問題 */}
+  const handleMouseMove = useCallback((e: MouseEvent) => {
+    if (!isResizing.current || !containerRef.current) return;
+    
+    // --- Bug Fix: Calculate width relative to the container ---
+    const containerStart = containerRef.current.getBoundingClientRect().left;
+    const newWidth = e.clientX - containerStart;
+
+    if (newWidth > 90 && newWidth < 600) { // Min 80px, Max 600px
+      setPanelWidth(newWidth);
+    }
+  }, []);
+
+  const handleMouseUp = useCallback(() => {
+    isResizing.current = false;
+    document.removeEventListener('mousemove', handleMouseMove);
+    document.removeEventListener('mouseup', handleMouseUp);
+  }, [handleMouseMove]);
+
+  return (
+    <div className="flex w-full h-full bg-white" ref={containerRef}>
+      <div style={{ width: `${panelWidth}px` }} className="flex-shrink-0 h-full">
+        <SourcePanel
+          availableSources={sources}
+          selectedSources={selectedSources}
+          onSelectSource={handleSelectSource}
+          onUploadSuccess={fetchSources}
+        />
+      </div>
+
+      <div 
+        className="w-2 h-full cursor-col-resize flex items-center justify-center group"
+        onMouseDown={handleMouseDown}
+      >
+        <div className="w-px h-16 bg-neutral-border rounded-full group-hover:bg-theme-primary transition-colors"></div>
+      </div>
+
       <main className="flex-1 h-full min-w-0">
         <ChatInterface 
           selectedSourceIds={selectedSources} 
