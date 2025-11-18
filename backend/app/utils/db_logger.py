@@ -47,6 +47,90 @@ except Exception as e:
         Column('source_id', Integer, primary_key=True),
     )
 
+import functools
+
+# --- Decorator for Task Logging ---
+
+def log_task(agent_name: str, task_description: str):
+    """
+    A decorator that wraps a LangGraph node function to automatically handle
+    database logging for task creation, completion, and failure.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+            task_id = create_task(
+                job_id=state['job_id'],
+                agent_name=agent_name,
+                task_description=task_description,
+                task_input={"user_query": state.get("user_query")},
+                parent_task_id=state.get("parent_task_id")
+            )
+            
+            if task_id is None:
+                # If task creation fails, we can't proceed.
+                error_message = f"Failed to create database task for agent '{agent_name}'."
+                print(f"[DB Logger] ERROR: {error_message}")
+                return {"error": error_message}
+
+            start_time = time.perf_counter()
+            
+            try:
+                # Inject the current task_id into the state for the node to use
+                state_for_node = state.copy()
+                state_for_node['current_task_id'] = task_id
+                
+                # Execute the original node function
+                result = func(state_for_node)
+                
+                duration_ms = int((time.perf_counter() - start_time) * 1000)
+                
+                # Extract token and cost info from the result, if present
+                prompt_tokens = result.pop("prompt_tokens", None)
+                completion_tokens = result.pop("completion_tokens", None)
+                estimated_cost_usd = result.pop("estimated_cost_usd", None)
+
+                # Check if the node itself returned an error
+                if result.get("error"):
+                    update_task(
+                        task_id, 'failed', 
+                        error_message=result["error"], 
+                        duration_ms=duration_ms
+                    )
+                else:
+                    # The output to be logged is the rest of the dictionary returned by the node
+                    update_task(
+                        task_id, 'completed', 
+                        output=result, 
+                        duration_ms=duration_ms,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        estimated_cost_usd=estimated_cost_usd
+                    )
+                
+                # The decorator should pass through the original result, but merge it with the main state
+                # to ensure any updates from the node are preserved.
+                final_result = state.copy()
+                final_result.update(result)
+
+                # Pass the ID of the task that just ran to the next steps in the graph.
+                # This is used by the aggregator to know which task to associate the content with,
+                # and by the next sibling node to know its parent.
+                if "error" not in final_result:
+                    final_result["parent_task_id"] = task_id
+                    final_result["current_task_id"] = task_id
+                    
+                return final_result
+
+            except Exception as e:
+                error_message = str(e)
+                duration_ms = int((time.perf_counter() - start_time) * 1000)
+                update_task(task_id, 'failed', error_message=error_message, duration_ms=duration_ms)
+                # Ensure the error is propagated in the state
+                return {"error": error_message}
+        return wrapper
+    return decorator
+
 # --- Job-level Logging ---
 
 def create_job(user_id: int, input_prompt: str, workflow_type: str, experiment_config: Optional[Dict] = None) -> Optional[int]:

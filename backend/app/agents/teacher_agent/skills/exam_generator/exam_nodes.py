@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ExamGenerationState
 from backend.app.agents.rag_agent import rag_agent
-from backend.app.utils import db_logger
+from backend.app.utils.db_logger import log_task, log_task_sources
 
 # --- Pydantic Models for Tool-based Planning ---
 class Task(BaseModel):
@@ -126,35 +126,24 @@ def _prepare_multimodal_content(retrieved_page_content: List[Dict[str, Any]]) ->
 
 # --- Node Functions ---
 
-def retrieve_chunks_node(state: ExamGenerationState) -> ExamGenerationState:
+@log_task(agent_name="retriever", task_description="Retrieve relevant document chunks using RAG.")
+def retrieve_chunks_node(state: ExamGenerationState) -> dict:
     """Retrieves context using RAGAgent and populates the state."""
-    task_id = db_logger.create_task(
-        state['job_id'], 
-        "retriever", 
-        "Retrieve relevant document chunks using RAG.",
-        task_input={"query": state["query"], "unique_content_id": state["unique_content_id"]},
-        parent_task_id=state.get("parent_task_id") # Use the ID passed from the parent graph
-    )
-    state["parent_task_id"] = task_id # Set self as parent for the next node in this sub-graph
-    start_time = time.perf_counter()
     try:
         rag_results = rag_agent.search(state["query"], state["unique_content_id"])
-        state["retrieved_text_chunks"] = rag_results["text_chunks"]
-        state["retrieved_page_content"] = rag_results["page_content"]
-        
-        # Log the retrieved sources to the database
-        db_logger.log_task_sources(task_id, rag_results["text_chunks"])
+        # The decorator has already created the task and injected its ID into the state
+        log_task_sources(state["current_task_id"], rag_results["text_chunks"])
 
-        state["generation_plan"], state["final_generated_content"], state["error"] = [], [], None
-        state["generation_errors"] = [] # Initialize generation_errors
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(task_id, 'completed', f"Retrieved {len(rag_results['text_chunks'])} chunks.", duration_ms=duration_ms)
+        return {
+            "retrieved_text_chunks": rag_results["text_chunks"],
+            "retrieved_page_content": rag_results["page_content"],
+            "generation_plan": [],
+            "final_generated_content": [],
+            "generation_errors": [],
+            "parent_task_id": state["current_task_id"] # Set self as parent for the next node
+        }
     except Exception as e:
-        state["error"] = f"Failed to retrieve context: {str(e)}"
-        state["generation_errors"].append({"task": "retriever", "error_message": str(e)})
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
-    return state
+        return {"error": f"Failed to retrieve context: {str(e)}"}
 
 def plan_generation_tasks_node(state: ExamGenerationState) -> ExamGenerationState:
     """Analyzes the user query to create a structured generation plan."""

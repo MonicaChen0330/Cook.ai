@@ -2,18 +2,22 @@ import os
 import shutil
 import tempfile
 from typing import Any, List
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends
-from pydantic import BaseModel, Field # Import Field
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, APIRouter
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
-import json # Import json
+import json
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse # Import RedirectResponse
 
 # Correctly import the refactored modules
 from backend.app.agents.teacher_agent.ingestion import process_file
 from backend.app.agents.teacher_agent.graph import app as teacher_agent_app
 from backend.app.utils import db_logger
-from backend.app.utils.db_logger import engine, metadata # Import engine and metadata
-from sqlalchemy import Table, select, update # Import sqlalchemy functions
+from backend.app.utils.db_logger import engine, metadata
+from sqlalchemy import Table, select, update
+
+# --- FastAPI App and Routers ---
 
 # Create the FastAPI app
 app = FastAPI(
@@ -21,10 +25,15 @@ app = FastAPI(
     description="API for ingesting documents and generating educational materials.",
 )
 
+# Create routers for different categories of endpoints
+agent_router = APIRouter(prefix="/api/v1", tags=["Agent Interaction"])
+data_management_router = APIRouter(prefix="/api/v1", tags=["Data Management"])
+testing_router = APIRouter(prefix="/api/v1/testing", tags=["Development & Testing"])
+
+
 # --- Add CORS Middleware ---
-# This allows the frontend (running on localhost:3001) to communicate with the backend.
 origins = [
-    "http://localhost:3001", # Confirmed Vite dev server port
+    "http://localhost:3001",
 ]
 
 app.add_middleware(
@@ -38,267 +47,69 @@ app.add_middleware(
 # --- API Models ---
 
 class IngestResponse(BaseModel):
-
     unique_content_id: int
-
-    file_name: str # ⬅️ Add this field for instant UI updates
-
+    file_name: str
     message: str
 
-
-
-class GenerateExamRequest(BaseModel):
-
+class ChatRequest(BaseModel):
     unique_content_id: int
-
     prompt: str
-
     user_id: int = 1 # Default mock user ID
 
-
-
-class GenerateExamResponse(BaseModel):
-
+class ChatResponse(BaseModel):
     job_id: int
-
-    result: Any # This will now be the parsed JSON object
-
-
+    result: Any
 
 class Material(BaseModel):
-
     id: int
-
-    name: str = Field(alias='file_name') # Let frontend use 'name', backend use 'file_name'
-
+    name: str = Field(alias='file_name')
     unique_content_id: int
 
-
-
 class UpdateMaterialRequest(BaseModel):
-
     name: str
 
-
-
 # --- Reflect 'materials' table ---
-
 try:
-
     materials_table = Table('materials', metadata, autoload_with=engine)
-
 except Exception as e:
-
     print(f"Error reflecting 'materials' table: {e}")
-
-    # Define a fallback if reflection fails, to allow server to start
-
     materials_table = None
 
+# --- Agent Interaction Endpoint ---
 
-
-# --- API Endpoints ---
-
-
-# 輸入course_id，撈回該課堂所有unique_material_data
-@app.get("/api/materials", response_model=List[Material])
-
-async def get_materials(course_id: int):
+@agent_router.post("/chat", response_model=ChatResponse)
+async def chat_with_agent(request: ChatRequest):
     """
-    Endpoint to get all materials for a given course.
-    """
-    print(f"[DIAGNOSTIC] /api/materials called with course_id: {course_id}") # LOGGING
-    if materials_table is None:
-
-        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
-
-    query = select(materials_table).where(materials_table.c.course_id == course_id)
-
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(query)
-            rows = result.fetchall()
-            print(f"[DIAGNOSTIC] Database query returned {len(rows)} rows.") # LOGGING
-            
-            material_list = []
-            for row in rows:
-                print(f"[DIAGNOSTIC] Material ID: {row.id}, File Name: '{row.file_name}'") # DETAILED LOGGING
-                material_list.append({
-                    "id": row.id, 
-                    "file_name": row.file_name,
-                    "unique_content_id": row.unique_content_id
-                })
-            return material_list
-            
-    except Exception as e:
-        print(f"[DIAGNOSTIC] An exception occurred: {e}") # LOGGING
-        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
-
-
-
-@app.patch("/api/materials/{material_id}", status_code=204)
-
-async def update_material_name(material_id: int, request: UpdateMaterialRequest):
-
-    """
-
-    Endpoint to update the name of a material.
-
-    """
-
-    if materials_table is None:
-
-        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
-
-
-
-    stmt = (
-
-        update(materials_table)
-
-        .where(materials_table.c.id == material_id)
-
-        .values(file_name=request.name)
-
-    )
-
-    try:
-
-        with engine.connect() as conn:
-
-            result = conn.execute(stmt)
-
-            if result.rowcount == 0:
-
-                raise HTTPException(status_code=404, detail=f"Material with id {material_id} not found.")
-
-            conn.commit()
-
-        return
-
-    except HTTPException:
-
-        raise # Re-raise HTTPException
-
-    except Exception as e:
-
-        raise HTTPException(status_code=500, detail=f"Database update failed: {e}")
-
-
-
-
-
-@app.post("/api/ingest", response_model=IngestResponse)
-
-async def ingest_document(
-
-    course_id: int = Form(1),
-
-    uploader_id: int = Form(1),
-
-    file: UploadFile = File(...)
-
-):
-
-    """
-
-    Endpoint to ingest a document. This is a teacher-specific action.
-
-    Receives a file, saves it temporarily, and processes it using the ingestion service.
-
-    """
-
-    with tempfile.TemporaryDirectory() as temp_dir:
-
-        file_path = os.path.join(temp_dir, file.filename)
-
-        
-
-        with open(file_path, "wb") as buffer:
-
-            shutil.copyfileobj(file.file, buffer)
-
-        
-
-        print(f"File '{file.filename}' saved to temporary path: {file_path}")
-
-
-
-        # The ingestion process is synchronous but involves I/O.
-
-        # Running it in a thread pool is good practice for an async server.
-
-        unique_content_id = await run_in_threadpool(
-
-            process_file,
-
-            file_path=file_path,
-
-            uploader_id=uploader_id,
-
-            course_id=course_id,
-
-            force_reprocess=False
-
-        )
-
-
-
-    if unique_content_id is None:
-
-        raise HTTPException(status_code=500, detail="Failed to process the document.")
-
-
-
-    return IngestResponse(
-
-        unique_content_id=unique_content_id,
-
-        file_name=file.filename, # ⬅️ Return the original filename
-
-        message=f"Successfully ingested file '{file.filename}'."
-
-    )
-
-@app.post("/api/generate_exam", response_model=GenerateExamResponse)
-async def generate_exam(request: GenerateExamRequest):
-    """
-    Endpoint to trigger the generation of materials by the Teacher Agent.
+    Main endpoint for interacting with the Teacher Agent.
+    The agent's graph will route the request to the appropriate skill.
     """
     job_id = db_logger.create_job(
         user_id=request.user_id,
         input_prompt=request.prompt,
-        workflow_type='api_teacher_agent_generation'
+        workflow_type='agent_chat'
     )
     if not job_id:
-        raise HTTPException(status_code=500, detail="Failed to create a generation job.")
+        raise HTTPException(status_code=500, detail="Failed to create a chat job.")
 
-    # Input for the teacher_agent graph
+    # Input for the teacher_agent graph.
+    # The graph's router node will determine the task based on the user_query.
     inputs = {
         "job_id": job_id,
         "user_id": request.user_id,
         "user_query": request.prompt,
         "unique_content_id": request.unique_content_id,
-        "task_name": "exam_generation", # This would be determined by a router in a more complex system
-        "task_parameters": {}
     }
 
     try:
-        # The graph is synchronous, run it in a thread pool
         final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
 
-        # The aggregate_final_output_node now handles the final job status update.
-        # We only need to check for errors that might have prevented aggregation.
         if final_state.get('error'):
             error_message = f"Generation failed: {final_state.get('error')}"
-            # If an error occurred before aggregation, ensure job status is failed
             db_logger.update_job_status(job_id, 'failed', error_message=error_message)
             raise HTTPException(status_code=500, detail=error_message)
         else:
-            # The final job status is set by aggregate_final_output_node
-            # Explicitly convert to JSON string and then back to Python object for robust serialization
             json_serializable_content = json.loads(json.dumps(final_state.get("final_result", []), ensure_ascii=False))
-            return GenerateExamResponse(
+            return ChatResponse(
                 job_id=job_id,
                 result=json_serializable_content
             )
@@ -306,24 +117,50 @@ async def generate_exam(request: GenerateExamRequest):
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
-@app.get("/")
-def read_root():
-    return {"message": "Welcome to the Cook.ai API Server. Visit /docs for the API documentation."}
+# --- Data Management Endpoints ---
 
-# --- Test Endpoint ---
+@data_management_router.get("/materials", response_model=List[Material])
+async def get_materials(course_id: int):
+    """
+    Endpoint to get all materials for a given course.
+    """
+    if materials_table is None:
+        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
+    query = select(materials_table).where(materials_table.c.course_id == course_id)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(query)
+            rows = result.fetchall()
+            material_list = [{"id": row.id, "file_name": row.file_name, "unique_content_id": row.unique_content_id} for row in rows]
+            return material_list
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
 
-@app.post("/api/test/ingest_and_generate", response_model=GenerateExamResponse)
-async def test_ingest_and_generate(
-    prompt: str = Form(...),
-    course_id: int = Form(1),
-    uploader_id: int = Form(1),
-    file: UploadFile = File(...)
-):
+@data_management_router.patch("/materials/{material_id}", status_code=204)
+async def update_material_name(material_id: int, request: UpdateMaterialRequest):
     """
-    **Test Endpoint:** Ingests a document and immediately triggers generation.
-    This provides a simple way to test the end-to-end flow.
+    Endpoint to update the name of a material.
     """
-    # --- Part 1: Ingestion ---
+    if materials_table is None:
+        raise HTTPException(status_code=500, detail="Database table 'materials' not found.")
+    stmt = update(materials_table).where(materials_table.c.id == material_id).values(file_name=request.name)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(stmt)
+            if result.rowcount == 0:
+                raise HTTPException(status_code=404, detail=f"Material with id {material_id} not found.")
+            conn.commit()
+        return
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database update failed: {e}")
+
+@data_management_router.post("/ingest", response_model=IngestResponse)
+async def ingest_document(course_id: int = Form(1), uploader_id: int = Form(1), file: UploadFile = File(...)):
+    """
+    Endpoint to ingest a document.
+    """
     with tempfile.TemporaryDirectory() as temp_dir:
         file_path = os.path.join(temp_dir, file.filename)
         with open(file_path, "wb") as buffer:
@@ -334,47 +171,109 @@ async def test_ingest_and_generate(
             file_path=file_path,
             uploader_id=uploader_id,
             course_id=course_id,
-            force_reprocess=True # Force reprocessing for tests
+            force_reprocess=False
         )
-
     if unique_content_id is None:
-        raise HTTPException(status_code=500, detail="[Test] Failed to process the document during ingestion phase.")
+        raise HTTPException(status_code=500, detail="Failed to process the document.")
+    return IngestResponse(
+        unique_content_id=unique_content_id,
+        file_name=file.filename,
+        message=f"Successfully ingested file '{file.filename}'."
+    )
 
-    # --- Part 2: Generation ---
+# --- Development & Testing Endpoints ---
+
+@testing_router.post("/generate_exam", response_model=ChatResponse)
+async def generate_exam_skill_test(request: ChatRequest):
+    """
+    **Skill Test Endpoint:** Directly triggers the exam generation flow.
+    This bypasses the main agent router for isolated testing of the exam generation skill.
+    """
     job_id = db_logger.create_job(
-        user_id=uploader_id,
-        input_prompt=prompt,
-        workflow_type='api_test_ingest_and_generate'
+        user_id=request.user_id,
+        input_prompt=request.prompt,
+        workflow_type='skill_test_generate_exam'
     )
     if not job_id:
-        raise HTTPException(status_code=500, detail="[Test] Failed to create a generation job.")
+        raise HTTPException(status_code=500, detail="Failed to create a generation job.")
 
     inputs = {
         "job_id": job_id,
-        "user_id": uploader_id,
-        "user_query": prompt,
-        "unique_content_id": unique_content_id,
-        "task_name": "exam_generation",
+        "user_id": request.user_id,
+        "user_query": request.prompt,
+        "unique_content_id": request.unique_content_id,
+        "task_name": "exam_generation", # Hardcoded for direct skill test
         "task_parameters": {}
     }
 
     try:
         final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
+        if final_state.get('error'):
+            error_message = f"Generation failed: {final_state.get('error')}"
+            db_logger.update_job_status(job_id, 'failed', error_message=error_message)
+            raise HTTPException(status_code=500, detail=error_message)
+        else:
+            json_serializable_content = json.loads(json.dumps(final_state.get("final_result", []), ensure_ascii=False))
+            return ChatResponse(
+                job_id=job_id,
+                result=json_serializable_content
+            )
+    except Exception as e:
+        db_logger.update_job_status(job_id, 'failed', error_message=str(e))
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
+@testing_router.post("/ingest_and_generate", response_model=ChatResponse)
+async def test_ingest_and_generate(prompt: str = Form(...), course_id: int = Form(1), uploader_id: int = Form(1), file: UploadFile = File(...)):
+    """
+    **E2E Test Endpoint:** Ingests a document and immediately triggers generation.
+    """
+    # Ingestion Part
+    with tempfile.TemporaryDirectory() as temp_dir:
+        file_path = os.path.join(temp_dir, file.filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        unique_content_id = await run_in_threadpool(process_file, file_path=file_path, uploader_id=uploader_id, course_id=course_id, force_reprocess=True)
+    if unique_content_id is None:
+        raise HTTPException(status_code=500, detail="[Test] Failed to process the document.")
+
+    # Generation Part
+    job_id = db_logger.create_job(user_id=uploader_id, input_prompt=prompt, workflow_type='e2e_test_ingest_and_generate')
+    if not job_id:
+        raise HTTPException(status_code=500, detail="[Test] Failed to create a job.")
+    inputs = {"job_id": job_id, "user_id": uploader_id, "user_query": prompt, "unique_content_id": unique_content_id, "task_name": "exam_generation", "task_parameters": {}}
+    try:
+        final_state = await run_in_threadpool(teacher_agent_app.invoke, inputs)
         if final_state.get('error'):
             error_message = f"[Test] Generation failed: {final_state.get('error')}"
             db_logger.update_job_status(job_id, 'failed', error_message=error_message)
             raise HTTPException(status_code=500, detail=error_message)
         else:
             db_logger.update_job_status(job_id, 'completed')
-            return GenerateExamResponse(
-                job_id=job_id,
-                result=final_state.get("final_generated_content", [])
-            )
+            return ChatResponse(job_id=job_id, result=final_state.get("final_generated_content", []))
     except Exception as e:
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))
         raise HTTPException(status_code=500, detail=f"[Test] An unexpected error occurred: {str(e)}")
 
+# --- Root, Health Check, and Router Registration ---
+
+@app.get("/", include_in_schema=False)
+def read_root():
+    """
+    Redirects the root URL to the API documentation.
+    """
+    return RedirectResponse(url="/docs")
+
+@app.get("/health", tags=["System"])
+def health_check():
+    """
+    A simple health check endpoint that returns the server status.
+    """
+    return {"status": "ok"}
+
+# Register the routers with the main FastAPI app
+app.include_router(agent_router)
+app.include_router(data_management_router)
+app.include_router(testing_router)
 
 # To run this server:
 # 1. Make sure you are in the root directory of the project (Cook.ai).

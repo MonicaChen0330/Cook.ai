@@ -1,3 +1,4 @@
+// TeacherAICenter.py
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import SourcePanel from './SourcePanel';
 import ChatInterface from './ChatInterface';
@@ -33,7 +34,7 @@ const TeacherAICenter: React.FC = () => {
           }, []);
   useEffect(() => {
     fetchSources();
-  }, [fetchSources]);
+  }, []);
 
   const handleSelectSource = (sourceId: string) => {
     setSelectedSources(prev =>
