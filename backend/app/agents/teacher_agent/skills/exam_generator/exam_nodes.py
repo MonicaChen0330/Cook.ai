@@ -10,6 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from .state import ExamGenerationState
 from backend.app.agents.rag_agent import rag_agent
+from backend.app.utils import db_logger # Add this import
 from backend.app.utils.db_logger import log_task, log_task_sources
 
 # --- Pydantic Models for Tool-based Planning ---
@@ -126,7 +127,7 @@ def _prepare_multimodal_content(retrieved_page_content: List[Dict[str, Any]]) ->
 
 # --- Node Functions ---
 
-@log_task(agent_name="retriever", task_description="Retrieve relevant document chunks using RAG.")
+@log_task(agent_name="retriever", task_description="Retrieve relevant document chunks using RAG.", input_extractor=lambda state: {"query": state.get("query"), "unique_content_id": state.get("unique_content_id")})
 def retrieve_chunks_node(state: ExamGenerationState) -> dict:
     """Retrieves context using RAGAgent and populates the state."""
     try:
@@ -145,62 +146,45 @@ def retrieve_chunks_node(state: ExamGenerationState) -> dict:
     except Exception as e:
         return {"error": f"Failed to retrieve context: {str(e)}"}
 
-def plan_generation_tasks_node(state: ExamGenerationState) -> ExamGenerationState:
-    """Analyzes the user query to create a structured generation plan."""
+@log_task(agent_name="plan_generation_tasks", task_description="Analyze user query to create a generation plan.", input_extractor=lambda state: {"query": state.get("query")})
+def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
+    """Analyzes the user query to create a structured generation plan using an LLM."""
+    # This node is not supposed to run if a plan already exists.
     if state.get("generation_plan") or state.get("final_generated_content"):
-        return state
-    
+        return {}
+
     try:
-        # This node uses an LLM, so we get it here to log its details
         llm = get_llm()
-        model_params = {"temperature": llm.temperature}
-
-        task_id = db_logger.create_task(
-            state['job_id'], 
-            "plan_generation_tasks", 
-            "Analyze user query to create a generation plan.",
-            parent_task_id=state.get("parent_task_id"),
-            model_name=llm.model_name,
-            model_parameters=model_params,
-            task_input={"query": state["query"]} # Add the query to task_input
-        )
-        state["parent_task_id"] = task_id # Become the parent for all subsequent generation tasks
-        start_time = time.perf_counter()
-
         prompt = f"Analyze the user's query to create a step-by-step generation plan.\n\n**User Query:** \"{state['query']}\"\n\nYou must respond by calling the `Plan` tool."
         planner_llm = llm.bind_tools(tools=[Plan], tool_choice="Plan")
         messages = [SystemMessage(content="You are a helpful assistant that creates a structured generation plan."), HumanMessage(content=prompt)]
+        
         response = planner_llm.invoke(messages)
         
         if not response.tool_calls:
             raise ValueError("The model did not call the required 'Plan' tool.")
             
         plan = Plan(**response.tool_calls[0]['args'])
-        state["generation_plan"] = [task.model_dump() for task in plan.tasks]
+        generation_plan = [task.model_dump() for task in plan.tasks]
         
-        # --- Log tokens and cost for the planner ---
-        prompt_tokens = response.response_metadata.get("token_usage", {}).get("prompt_tokens", 0)
-        completion_tokens = response.response_metadata.get("token_usage", {}).get("completion_tokens", 0)
+        # --- Extract tokens and cost for the decorator ---
+        token_usage = response.response_metadata.get("token_usage", {})
+        prompt_tokens = token_usage.get("prompt_tokens", 0)
+        completion_tokens = token_usage.get("completion_tokens", 0)
         model_name = llm.model_name
         pricing = MODEL_PRICING.get(model_name, {"input": 0, "output": 0})
         estimated_cost = ((prompt_tokens / 1_000_000) * pricing["input"]) + ((completion_tokens / 1_000_000) * pricing["output"])
 
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(
-            task_id, 
-            'completed', 
-            state["generation_plan"], # Pass the actual list of dicts
-            duration_ms=duration_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            estimated_cost_usd=estimated_cost
-        )
+        return {
+            "generation_plan": generation_plan,
+            "parent_task_id": state["current_task_id"], # Pass self as parent for next nodes
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "estimated_cost_usd": estimated_cost
+        }
     except Exception as e:
-        state["error"] = f"Failed to create a generation plan: {e}"
-        state["generation_errors"].append({"task": "plan_generation_tasks", "error_message": str(e)})
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
-    return state
+        error_message = f"Failed to create a generation plan: {e}"
+        return {"error": error_message, "generation_errors": [{"task": "plan_generation_tasks", "error_message": str(e)}]}
 
 def prepare_next_task_node(state: ExamGenerationState) -> ExamGenerationState:
     """Pops the next task from the plan and sets it as the current task."""
@@ -223,25 +207,16 @@ def should_continue_router(state: ExamGenerationState) -> str:
 
 # --- Refactored Generation Logic ---
 
-def _generic_generate_question(state: ExamGenerationState, task_type_name: str) -> ExamGenerationState:
-    """A generic function that handles question generation for a given task type using LLM function calling."""
+def _generic_generate_question(state: ExamGenerationState, task_type_name: str) -> dict:
+    """
+    A generic internal function that handles question generation.
+    It is called by the public-facing, decorated node functions.
+    It returns a dictionary with results and metrics for the decorator to log.
+    """
     current_task = state.get("current_task", {})
     
-    llm = get_llm()
-    model_params = {"temperature": llm.temperature}
-
-    task_id = db_logger.create_task(
-        state['job_id'], 
-        f"generate_{task_type_name}", 
-        f"Generate {task_type_name} questions.",
-        parent_task_id=state.get("parent_task_id"),
-        task_input=current_task,
-        model_name=llm.model_name,
-        model_parameters=model_params
-    )
-    start_time = time.perf_counter()
-
     try:
+        llm = get_llm()
         task_details = f"Task: Generate {current_task.get('count', 1)} {task_type_name.replace('_', ' ')} question(s)"
         if current_task.get('topic'):
             task_details += f" about '{current_task.get('topic')}'"
@@ -282,72 +257,125 @@ def _generic_generate_question(state: ExamGenerationState, task_type_name: str) 
             HumanMessage(content=human_message_content)
         ]
 
-        # Select the appropriate Pydantic model for tool binding
-        tool_model = None
-        if task_type_name == "multiple_choice":
-            tool_model = MultipleChoiceQuestionsList
-        elif task_type_name == "true_false":
-            tool_model = TrueFalseQuestionsList
-        elif task_type_name == "short_answer":
-            tool_model = ShortAnswerQuestionsList
-        else:
+        tool_model_map = {
+            "multiple_choice": MultipleChoiceQuestionsList,
+            "true_false": TrueFalseQuestionsList,
+            "short_answer": ShortAnswerQuestionsList,
+        }
+        tool_model = tool_model_map.get(task_type_name)
+        if not tool_model:
             raise ValueError(f"Unsupported task type: {task_type_name}")
 
-        # Bind the tool to the LLM
         tool_llm = llm.bind_tools(tools=[tool_model], tool_choice={"type": "function", "function": {"name": tool_model.__name__}})
         response = tool_llm.invoke(messages)
         
         if not response.tool_calls:
             raise ValueError("The model did not call the required tool to generate questions.")
             
-        # Extract the questions from the tool call
         generated_questions_list = tool_model(**response.tool_calls[0]['args'])
         
-        # Store the list of question dictionaries in final_generated_content
-        # Convert Pydantic models to dictionaries for storage
-        state["final_generated_content"].append({
+        final_generated_content = {
             "type": task_type_name,
             "questions": [q.model_dump() for q in generated_questions_list.questions]
-        })
+        }
         
-        # --- Log tokens and cost ---
         token_usage = response.response_metadata.get("token_usage", {})
         prompt_tokens = token_usage.get("prompt_tokens", 0)
         completion_tokens = token_usage.get("completion_tokens", 0)
-        
         model_name = llm.model_name
         pricing = MODEL_PRICING.get(model_name, {"input": 0, "output": 0})
         estimated_cost = ((prompt_tokens / 1_000_000) * pricing["input"]) + ((completion_tokens / 1_000_000) * pricing["output"])
 
-        # Save the generated content to the database (as JSON string)
-        title = f"Generated {current_task.get('count', 1)} {task_type_name.replace('_', ' ')} questions"
-        db_logger.save_generated_content(task_id, task_type_name, title, json.dumps(generated_questions_list.model_dump(), ensure_ascii=False, indent=2))
-        
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(
-            task_id, 
-            'completed', 
-            generated_questions_list.model_dump(), # Pass the actual dict
-            duration_ms=duration_ms,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            estimated_cost_usd=estimated_cost
-        )
-    except Exception as e:
-        state["error"] = f"Error in {task_type_name} generation: {str(e)}"
-        state["generation_errors"].append({"task_type": task_type_name, "error_message": str(e), "task_input": current_task})
-        duration_ms = int((time.perf_counter() - start_time) * 1000)
-        db_logger.update_task(task_id, 'failed', error_message=str(e), duration_ms=duration_ms)
-    return state
+        # The decorator will handle logging the output.
+        # We append to a new list to avoid modifying state directly in a deep way.
+        new_final_generated_content = state.get("final_generated_content", []) + [final_generated_content]
 
-def generate_multiple_choice_node(state: ExamGenerationState) -> ExamGenerationState:
+        return {
+            "final_generated_content": new_final_generated_content,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "estimated_cost_usd": estimated_cost
+        }
+    except Exception as e:
+        error_message = f"Error in {task_type_name} generation: {str(e)}"
+        new_generation_errors = state.get("generation_errors", []) + [{"task_type": task_type_name, "error_message": str(e), "task_input": current_task}]
+        return {"error": error_message, "generation_errors": new_generation_errors}
+
+@log_task(agent_name="generate_multiple_choice", task_description="Generate multiple choice questions.", input_extractor=lambda state: {"current_task": state.get("current_task")})
+def generate_multiple_choice_node(state: ExamGenerationState) -> dict:
     return _generic_generate_question(state, "multiple_choice")
 
-def generate_short_answer_node(state: ExamGenerationState) -> ExamGenerationState:
+@log_task(agent_name="generate_short_answer", task_description="Generate short answer questions.", input_extractor=lambda state: {"current_task": state.get("current_task")})
+def generate_short_answer_node(state: ExamGenerationState) -> dict:
     return _generic_generate_question(state, "short_answer")
 
-def generate_true_false_node(state: ExamGenerationState) -> ExamGenerationState:
+@log_task(agent_name="generate_true_false", task_description="Generate true/false questions.", input_extractor=lambda state: {"current_task": state.get("current_task")})
+def generate_true_false_node(state: ExamGenerationState) -> dict:
     return _generic_generate_question(state, "true_false")
+
+def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
+    """Handles any errors that occurred during the process."""
+    # This error is now logged at the node where it occurred.
+    # This node is primarily for graph control flow.
+    return state
+
+@log_task(agent_name="aggregate_exam_output", task_description="Aggregating all generated exam content into a final structured output.", input_extractor=lambda state: {"query": state.get("query"), "aggregated_item_count": len(state.get("final_generated_content", []))})
+def aggregate_final_output_node(state: ExamGenerationState) -> dict:
+    """
+    Aggregates all generated content, saves it to the database, and updates the job's final_output_id.
+    This node's execution is logged by the @log_task decorator.
+    """
+    job_id = state['job_id']
+    
+    try:
+        aggregated_output = []
+        for content_item in state["final_generated_content"]:
+            if isinstance(content_item, dict) and "type" in content_item and "questions" in content_item:
+                aggregated_output.append(content_item)
+            else:
+                aggregated_output.append({"type": "unstructured_content", "content": content_item})
+
+        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
+        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
+
+        if state.get("generation_errors"):
+            aggregated_output.insert(0, {
+                "type": "generation_warnings",
+                "message": "Some question types failed to generate. Please check the details below.",
+                "errors": state["generation_errors"]
+            })
+        
+        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
+
+        # The decorator has already created the task for this node. We use its ID.
+        current_task_id = state["current_task_id"]
+        final_content_id = db_logger.save_generated_content(
+            current_task_id,
+            "final_exam_output",
+            generated_title,
+            final_json_output
+        )
+
+        if final_content_id:
+            db_logger.update_job_final_output(job_id, final_content_id)
+        else:
+            raise Exception("Failed to save final aggregated content.")
+
+        job_status = 'completed'
+        if state.get("generation_errors"):
+            job_status = 'partial_success' if len(aggregated_output) > 1 else 'failed'
+        
+        db_logger.update_job_status(job_id, job_status, error_message="Some generation tasks failed." if job_status == 'partial_success' else None)
+
+        # Return the final aggregated content for the decorator to log as this node's output
+        return {"final_generated_content": aggregated_output}
+
+    except Exception as e:
+        error_message = f"Error aggregating final output: {str(e)}"
+        db_logger.update_job_status(job_id, 'failed', error_message=error_message)
+        # Return the error for the decorator to log
+        return {"error": error_message, "generation_errors": state.get("generation_errors", []) + [{"task": "aggregate_final_output", "error_message": str(e)}]}
+
 
 def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
     """Handles any errors that occurred during the process."""

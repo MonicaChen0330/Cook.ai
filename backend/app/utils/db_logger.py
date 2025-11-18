@@ -51,19 +51,39 @@ import functools
 
 # --- Decorator for Task Logging ---
 
-def log_task(agent_name: str, task_description: str):
+def log_task(agent_name: str, task_description: str, input_extractor: Optional[callable] = None):
     """
     A decorator that wraps a LangGraph node function to automatically handle
     database logging for task creation, completion, and failure.
+    
+    Args:
+        agent_name (str): The name of the agent/node.
+        task_description (str): A brief description of the task performed by the node.
+        input_extractor (Optional[callable]): A function that takes the 'state' dictionary
+                                              and returns a dictionary representing the
+                                              relevant input for this task. If None,
+                                              defaults to {"user_query": state.get("user_query")}.
     """
     def decorator(func):
         @functools.wraps(func)
         def wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+            # Determine task_input based on input_extractor or default
+            extracted_task_input = None
+            if input_extractor:
+                try:
+                    extracted_task_input = input_extractor(state)
+                except Exception as e:
+                    print(f"[DB Logger] WARNING: Failed to extract task input for '{agent_name}': {e}")
+                    # Fallback to default if extractor fails
+                    extracted_task_input = {"user_query": state.get("user_query")}
+            else:
+                extracted_task_input = {"user_query": state.get("user_query")}
+
             task_id = create_task(
                 job_id=state['job_id'],
                 agent_name=agent_name,
                 task_description=task_description,
-                task_input={"user_query": state.get("user_query")},
+                task_input=extracted_task_input,
                 parent_task_id=state.get("parent_task_id")
             )
             
@@ -294,6 +314,17 @@ def save_generated_content(task_id: int, content_type: str, title: str, content:
             # The 'content' column in the DB is JSON. Parse the incoming JSON string.
             parsed_content = json.loads(content)
             
+            # Inject the content_type as a 'type' field into the parsed content
+            if isinstance(parsed_content, dict):
+                parsed_content["type"] = content_type
+            elif isinstance(parsed_content, list):
+                # If it's a list, we might need to decide how to handle it.
+                # For now, we'll wrap it in a dict with the type.
+                parsed_content = {"type": content_type, "data": parsed_content}
+            else:
+                # For other types (e.g., string, int), wrap it in a dict with the type.
+                parsed_content = {"type": content_type, "value": parsed_content}
+            
             stmt = insert(generated_contents).values(
                 source_agent_task_id=task_id,
                 content_type=content_type,
@@ -312,4 +343,28 @@ def save_generated_content(task_id: int, content_type: str, title: str, content:
             
     except Exception as e:
         print(f"[DB Logger] ERROR: Failed to save generated content for task {task_id}. Reason: {e}")
+        return None
+
+def get_generated_content_by_id(content_id: int) -> Optional[Dict]:
+    """Retrieves generated content by its ID from the GENERATED_CONTENTS table."""
+    try:
+        with engine.connect() as conn:
+            stmt = select(generated_contents.c.content, generated_contents.c.title).where(generated_contents.c.id == content_id)
+            result = conn.execute(stmt).fetchone()
+            if result:
+                return {"title": result.title, "data": result.content}
+            return None
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to retrieve generated content {content_id}. Reason: {e}")
+        return None
+
+def get_job_final_output_id(job_id: int) -> Optional[int]:
+    """Retrieves the final_output_id for a given job_id from the orchestration_jobs table."""
+    try:
+        with engine.connect() as conn:
+            stmt = select(orchestration_jobs.c.final_output_id).where(orchestration_jobs.c.id == job_id)
+            result = conn.execute(stmt).scalar_one_or_none()
+            return result
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to retrieve final_output_id for job {job_id}. Reason: {e}")
         return None
