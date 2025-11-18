@@ -21,3 +21,8 @@ class TeacherAgentState(TypedDict):
     # Final result from the skill sub-graph
     final_result: Any
     error: Optional[str]
+    
+    # For routing logic
+    next_node: Optional[str]
+    parent_task_id: Optional[int]
+    current_task_id: Optional[int]
