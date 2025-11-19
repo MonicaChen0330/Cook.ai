@@ -204,6 +204,17 @@ def update_job_final_output(job_id: int, final_output_id: int):
     except Exception as e:
         print(f"[DB Logger] ERROR: Failed to update job {job_id} final_output_id. Reason: {e}")
 
+def get_job_status(job_id: int) -> Optional[str]:
+    """Retrieves the current status of a job."""
+    try:
+        with engine.connect() as conn:
+            stmt = select(orchestration_jobs.c.status).where(orchestration_jobs.c.id == job_id)
+            status = conn.execute(stmt).scalar_one_or_none()
+            return status
+    except Exception as e:
+        print(f"[DB Logger] ERROR: Failed to get status for job {job_id}. Reason: {e}")
+        return None
+
 # --- Task-level Logging ---
 
 def create_task(job_id: int, agent_name: str, task_description: str, task_input: Optional[Dict] = None, model_name: Optional[str] = None, parent_task_id: Optional[int] = None, model_parameters: Optional[Dict] = None) -> Optional[int]:

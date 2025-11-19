@@ -34,6 +34,7 @@ testing_router = APIRouter(prefix="/api/v1/testing", tags=["Development & Testin
 # --- Add CORS Middleware ---
 origins = [
     "http://localhost:3001",
+    "http://140.115.54.162:3001",
 ]
 
 app.add_middleware(
@@ -108,10 +109,19 @@ async def chat_with_agent(request: ChatRequest):
             db_logger.update_job_status(job_id, 'failed', error_message=error_message)
             raise HTTPException(status_code=500, detail=error_message)
         else:
-            json_serializable_content = json.loads(json.dumps(final_state.get("final_result", []), ensure_ascii=False))
+            api_response_payload = final_state.get("final_result")
+
+            if not isinstance(api_response_payload, dict):
+                 raise HTTPException(status_code=500, detail="Final result payload structure missing or invalid.")
+
+            json_serializable_content = json.loads(json.dumps(api_response_payload, ensure_ascii=False))
+            
+            if 'job_id' in json_serializable_content:
+                del json_serializable_content['job_id']
+            
             return ChatResponse(
                 job_id=job_id,
-                result=json_serializable_content
+                result=json_serializable_content 
             )
     except Exception as e:
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))

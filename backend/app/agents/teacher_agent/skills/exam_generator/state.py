@@ -8,6 +8,7 @@ class ExamGenerationState(TypedDict):
     job_id: int  # The ID of the parent orchestration job for logging
     query: str
     unique_content_id: int
+    main_title: Optional[str] # Add this
     retrieved_text_chunks: List[Dict[str, Any]]
     retrieved_page_content: List[Dict[str, Any]]
     generation_plan: List[Dict[str, Any]]
