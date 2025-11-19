@@ -24,8 +24,8 @@ document_content = Table('document_content', metadata, autoload_with=engine)
 class RAGAgent:
     """
     Agent for performing Retrieval-Augmented Generation tasks.
+    # This class handles all RAG-related logic.
     """
-
     def search(self, user_prompt: str, unique_content_id: int, top_k: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
         """
         Performs a multi-modal RAG search and returns a dictionary separating

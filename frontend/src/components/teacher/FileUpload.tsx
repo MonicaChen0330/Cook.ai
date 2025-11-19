@@ -1,30 +1,23 @@
 // frontend/src/components/teacher/FileUpload.tsx
 
-import React, { useState } from 'react';
-import { FaUpload } from 'react-icons/fa';
-import Button from '../common/Button';
+import React, { useState, useRef } from 'react';
+import Fab from '@mui/material/Fab';
+import UploadFileIcon from '@mui/icons-material/UploadFile';
+import Box from '@mui/material/Box';
 
 interface FileUploadProps {
   onUploadSuccess: () => void; // Define the prop
 }
 
-function FileUpload({ onUploadSuccess }: FileUploadProps) { // Destructure the prop
+function FileUpload({ onUploadSuccess }: FileUploadProps) {
   const [file, setFile] = useState<File | null>(null);
   const [message, setMessage] = useState<string>('');
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files) {
-      setFile(event.target.files[0]);
-      setMessage('');
-    }
-  };
-
-  // This function now just returns a promise, as the Button component expects.
   const handleUpload = async () => {
     if (!file) {
-      // We can set a message and the Button component will show its error state.
-      setMessage('Please select a file first.');
-      throw new Error('Please select a file first.');
+      setMessage('請先選擇一個檔案。');
+      return;
     }
 
     setMessage(''); // Clear previous messages
@@ -39,42 +32,53 @@ function FileUpload({ onUploadSuccess }: FileUploadProps) { // Destructure the p
     const data = await response.json();
 
     if (!response.ok) {
-      // Set a detailed error message and throw an error for the Button component
-      setMessage(`Error: ${data.detail || 'Upload failed'}`);
-      throw new Error(data.detail || 'Upload failed');
+      setMessage(`錯誤: ${data.detail || '上傳失敗'}`);
+      // throw new Error(data.detail || '上傳失敗'); // No longer throwing to keep component state
+      return;
     }
 
-    // On success, we can set a success message.
-    setMessage(`Success! File ingested with ID: ${data.unique_content_id}`);
-    
-    // Call the refresh function passed from the parent
+    setMessage(`成功! 檔案已攝取，ID: ${data.unique_content_id}`);
     onUploadSuccess();
-
-    // The Button component will handle its own 'success' state.
+    setFile(null); // Clear file after successful upload
   };
 
+  const handleFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      setFile(event.target.files[0]);
+      setMessage('');
+      // Automatically trigger upload after file selection
+      // This will cause handleUpload to run with the newly set file
+    }
+  };
+
+  // Effect to trigger upload when file state changes (after selection)
+  React.useEffect(() => {
+    if (file) {
+      handleUpload();
+    }
+  }, [file]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    // Removed inline style for cleaner integration
     <div>
-      <input type="file" onChange={handleFileChange} className="mb-2 block w-full text-sm text-neutral-text-main file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-theme-primary-light file:text-theme-primary hover:file:bg-theme-primary-lighter" />
-      <Button
-        variant="primary"
-        size="md"
-        // The Button component now manages its own state. We no longer pass `buttonState`.
-        onClick={handleUpload} // Pass the promise-returning function
-        idleText={
-          <span className="flex items-center gap-2">
-            <FaUpload className="w-4 h-4" /> 上傳檔案
-          </span>
-        }
-        loadingText="上傳中..."
-        successText="上傳成功！"
-        errorText="上傳失敗"
-        className="w-full"
-        disabled={!file} // Disable if no file is selected
+      <input
+        type="file"
+        ref={fileInputRef}
+        onChange={handleFileChange}
+        style={{ display: 'none' }} // Hide the native input
       />
-      {/* The message state is now used for success/error details */}
-      {message && <p className="text-sm mt-2">{message}</p>}
+      <Box sx={{ display: 'flex', justifyContent: 'center', mt: 2 }}>
+        <Fab
+          color="primary"
+          aria-label="上傳檔案"
+          onClick={() => fileInputRef.current?.click()} // Trigger hidden input click
+          size="medium"
+          sx={{ boxShadow: 'none' }}
+        >
+          <UploadFileIcon />
+        </Fab>
+      </Box>
+      {message && <p className="text-sm mt-2 text-center">{message}</p>}
+      {file && <p className="text-sm mt-1 text-center text-neutral-text-secondary">已選取檔案: {file.name}</p>}
     </div>
   );
 }

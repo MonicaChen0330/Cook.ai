@@ -22,6 +22,7 @@ class Task(BaseModel):
 
 class Plan(BaseModel):
     """A structured plan consisting of a list of generation tasks."""
+    main_title: str = Field(..., description="A concise, professional title (in Traditional Chinese) that clearly describes the topic and focus of the generated exam questions based on the user's query.")
     tasks: List[Task] = Field(..., description="A list of generation tasks to perform based on the user's query.")
 
 # --- Pydantic Models for Question Types ---
@@ -131,7 +132,7 @@ def _prepare_multimodal_content(retrieved_page_content: List[Dict[str, Any]]) ->
 def retrieve_chunks_node(state: ExamGenerationState) -> dict:
     """Retrieves context using RAGAgent and populates the state."""
     try:
-        rag_results = rag_agent.search(state["query"], state["unique_content_id"])
+        rag_results = rag_agent.search(user_prompt=state["query"], unique_content_id=state["unique_content_id"])
         # The decorator has already created the task and injected its ID into the state
         log_task_sources(state["current_task_id"], rag_results["text_chunks"])
 
@@ -155,9 +156,9 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
 
     try:
         llm = get_llm()
-        prompt = f"Analyze the user's query to create a step-by-step generation plan.\n\n**User Query:** \"{state['query']}\"\n\nYou must respond by calling the `Plan` tool."
+        prompt = f"Analyze the user's query to create a structured generation plan and a descriptive main title. The title should summarize the entire task in Traditional Chinese.\n\n**User Query:** \"{state['query']}\"\n\nYou must respond by calling the `Plan` tool."
         planner_llm = llm.bind_tools(tools=[Plan], tool_choice="Plan")
-        messages = [SystemMessage(content="You are a helpful assistant that creates a structured generation plan."), HumanMessage(content=prompt)]
+        messages = [SystemMessage(content="You are a helpful assistant that creates a structured generation plan and a descriptive title."), HumanMessage(content=prompt)]
         
         response = planner_llm.invoke(messages)
         
@@ -165,6 +166,8 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
             raise ValueError("The model did not call the required 'Plan' tool.")
             
         plan = Plan(**response.tool_calls[0]['args'])
+
+        main_title = plan.main_title
         generation_plan = [task.model_dump() for task in plan.tasks]
         
         # --- Extract tokens and cost for the decorator ---
@@ -177,6 +180,7 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
 
         return {
             "generation_plan": generation_plan,
+            "main_title": main_title,
             "parent_task_id": state["current_task_id"], # Pass self as parent for next nodes
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -292,6 +296,7 @@ def _generic_generate_question(state: ExamGenerationState, task_type_name: str) 
 
         return {
             "final_generated_content": new_final_generated_content,
+            "main_title": state.get("main_title"), # Preserve the title
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "estimated_cost_usd": estimated_cost
@@ -322,8 +327,7 @@ def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
 @log_task(agent_name="aggregate_exam_output", task_description="Aggregating all generated exam content into a final structured output.", input_extractor=lambda state: {"query": state.get("query"), "aggregated_item_count": len(state.get("final_generated_content", []))})
 def aggregate_final_output_node(state: ExamGenerationState) -> dict:
     """
-    Aggregates all generated content, saves it to the database, and updates the job's final_output_id.
-    This node's execution is logged by the @log_task decorator.
+    Aggregates all generated content and returns it in the state for the parent graph.
     """
     job_id = state['job_id']
     
@@ -335,9 +339,6 @@ def aggregate_final_output_node(state: ExamGenerationState) -> dict:
             else:
                 aggregated_output.append({"type": "unstructured_content", "content": content_item})
 
-        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
-        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
-
         if state.get("generation_errors"):
             aggregated_output.insert(0, {
                 "type": "generation_warnings",
@@ -345,130 +346,23 @@ def aggregate_final_output_node(state: ExamGenerationState) -> dict:
                 "errors": state["generation_errors"]
             })
         
-        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
-
-        # The decorator has already created the task for this node. We use its ID.
-        current_task_id = state["current_task_id"]
-        final_content_id = db_logger.save_generated_content(
-            current_task_id,
-            "final_exam_output",
-            generated_title,
-            final_json_output
-        )
-
-        if final_content_id:
-            db_logger.update_job_final_output(job_id, final_content_id)
-        else:
-            raise Exception("Failed to save final aggregated content.")
-
+        # Determine final job status and update it
         job_status = 'completed'
         if state.get("generation_errors"):
             job_status = 'partial_success' if len(aggregated_output) > 1 else 'failed'
         
         db_logger.update_job_status(job_id, job_status, error_message="Some generation tasks failed." if job_status == 'partial_success' else None)
 
-        # Return the final aggregated content for the decorator to log as this node's output
-        return {"final_generated_content": aggregated_output}
+        existing_title = state.get("main_title")
+
+        # Return the final aggregated content for the decorator to log and for the parent graph to use.
+        return {
+            "final_generated_content": aggregated_output,
+            "main_title": existing_title if existing_title else f"未命名測驗 ({datetime.now().strftime('%Y-%m-%d')})"
+        }
 
     except Exception as e:
         error_message = f"Error aggregating final output: {str(e)}"
         db_logger.update_job_status(job_id, 'failed', error_message=error_message)
         # Return the error for the decorator to log
         return {"error": error_message, "generation_errors": state.get("generation_errors", []) + [{"task": "aggregate_final_output", "error_message": str(e)}]}
-
-
-def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
-    """Handles any errors that occurred during the process."""
-    # This error is now logged at the node where it occurred.
-    # This node is primarily for graph control flow.
-    return state
-
-def aggregate_final_output_node(state: ExamGenerationState) -> ExamGenerationState:
-    """
-    Aggregates all generated content (which are now structured JSON objects) into a single
-    structured JSON object, saves it to the database, and updates the job's final_output_id.
-    Also generates a title for the aggregated content.
-    """
-    job_id = state['job_id']
-    duration_ms = 0 # Initialize duration_ms
-
-    task_id = db_logger.create_task(
-        job_id,
-        "aggregate_final_output",
-        "Aggregating all generated exam content into a final structured output.",
-        parent_task_id=state.get("parent_task_id"),
-        task_input={"query": state["query"], "aggregated_item_count": len(state["final_generated_content"])}
-    )
-    start_time = time.perf_counter()
-
-    aggregated_output = []
-    
-    try:
-        for content_item in state["final_generated_content"]:
-            # content_item is expected to be a dictionary like {"type": "multiple_choice", "questions": [...]}
-            if isinstance(content_item, dict) and "type" in content_item and "questions" in content_item:
-                aggregated_output.append(content_item)
-            else:
-                # Fallback for any unexpected format, though with tool calling, this should be rare
-                aggregated_output.append({
-                    "type": "unstructured_content",
-                    "content": content_item # Store as is if not structured
-                })
-
-        # Generate a title for the aggregated content
-        # Example: "Exam based on 'User Query' - [Date]"
-        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
-        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
-
-        # Add generation errors to the aggregated output if any
-        if state["generation_errors"]:
-            aggregated_output.insert(0, { # Insert at the beginning for prominence
-                "type": "generation_warnings",
-                "message": "Some question types failed to generate. Please check the details below.",
-                "errors": state["generation_errors"]
-            })
-        
-        # Convert the aggregated output to a JSON string
-        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
-
-        # Save the final aggregated content to the database
-        final_content_id = db_logger.save_generated_content(
-            task_id,
-            "final_exam_output",
-            generated_title,
-            final_json_output
-        )
-
-        if final_content_id:
-            db_logger.update_job_final_output(job_id, final_content_id)
-            # Update state with the actual aggregated output (parsed JSON object)
-            state["final_generated_content"] = aggregated_output
-        else:
-            raise Exception("Failed to save final aggregated content.")
-
-        # Determine final job status
-        job_status = 'completed'
-        if state["generation_errors"]:
-            if aggregated_output and len(aggregated_output) > 1: # More than just the warning message
-                job_status = 'partial_success'
-            else:
-                job_status = 'failed'
-        
-        duration_ms = int((time.perf_counter() - start_time) * 1000) # Define duration_ms here
-        db_logger.update_task(task_id, job_status, json.loads(final_json_output), duration_ms=duration_ms)
-
-    except Exception as e:
-        state["error"] = f"Error aggregating final output: {str(e)}"
-        state["generation_errors"].append({"task": "aggregate_final_output", "error_message": str(e)})
-        job_status = 'failed'
-        db_logger.update_task(task_id, job_status, error_message=str(e), duration_ms=duration_ms) # Use initialized duration_ms
-    
-    # Update the main job status based on the overall outcome
-    if job_status == 'failed':
-        db_logger.update_job_status(job_id, 'failed', error_message=state["error"])
-    elif job_status == 'partial_success':
-        db_logger.update_job_status(job_id, 'partial_success', error_message="Some generation tasks failed.")
-    else:
-        db_logger.update_job_status(job_id, 'completed')
-
-    return state

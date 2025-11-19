@@ -8,7 +8,7 @@ class SummarizationState(TypedDict):
     query: str
     unique_content_id: str
     retrieved_page_content: List[Dict[str, Any]]
-    summary: Optional[str]
+    final_generated_content: Optional[Dict[str, Any]]
     error: Optional[str]
     
     # Fields for logging and graph flow

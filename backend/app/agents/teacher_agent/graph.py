@@ -2,6 +2,7 @@ import time
 import json
 from typing import Literal
 from pydantic import BaseModel, Field
+from datetime import datetime
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
 
@@ -119,7 +120,7 @@ def exam_skill_node(state: TeacherAgentState) -> dict:
         if final_skill_state.get("error"):
             raise Exception(f"Exam generator skill failed: {final_skill_state['error']}")
         
-        final_result = final_skill_state.get("final_generated_content")
+        final_result = final_skill_state
         return {"final_result": final_result}
 
     except Exception as e:
@@ -143,7 +144,7 @@ def summarization_skill_node(state: TeacherAgentState) -> dict: # New skill node
         if final_skill_state.get("error"):
             raise Exception(f"Summarization skill failed: {final_skill_state['error']}")
         
-        final_result = final_skill_state.get("summary") # Summarization skill returns 'summary'
+        final_result = final_skill_state
         return {"final_result": final_result}
 
     except Exception as e:
@@ -151,84 +152,111 @@ def summarization_skill_node(state: TeacherAgentState) -> dict: # New skill node
 
 # --- Final Aggregation Node ---
 
-@log_task(agent_name="aggregate_output", task_description="Final node to update the main job status and save content if necessary.", input_extractor=lambda state: {"job_id": state.get("job_id"), "next_node": state.get("next_node"), "error_status": state.get("error")})
+@log_task(agent_name="aggregate_output", task_description="Final node to aggregate content and finalize job status.", input_extractor=lambda state: {"job_id": state.get("job_id"), "next_node": state.get("next_node"), "error_status": state.get("error")})
 def aggregate_output_node(state: TeacherAgentState) -> dict:
-    """
-    Final node to update the main job status, save content if necessary,
-    and return a standardized API response for frontend rendering.
-    """
     job_id = state['job_id']
-    final_api_response = {"job_id": job_id, "display_type": "text_message", "content": {}}
+    next_node = state.get("next_node")
+    final_api_response = {"job_id": job_id}
     
+    # Check for critical errors from previous nodes
     if state.get("error"):
         db_logger.update_job_status(job_id, 'failed', error_message=state["error"])
-        final_api_response["content"] = {"message": "Job failed due to an error.", "error_details": state["error"]}
+        final_api_response["display_type"] = "text_message"
+        final_api_response["content"] = {"message": "Job failed due to a critical error.", "error_details": state["error"]}
         return final_api_response
 
-    # Determine display_type and content based on which skill was executed
-    next_node = state.get("next_node")
-    final_result = state.get("final_result") # This holds the output from the executed skill
+    final_result = state.get("final_result")
+
+    # Format the final result based on the skill used for DB logging
+    db_title = None
 
     if next_node == "general_chat_skill":
         if final_result and isinstance(final_result, dict) and "content" in final_result:
             final_api_response["display_type"] = "text_message"
-            final_api_response["content"] = {"message": final_result["content"]}
-            try:
-                # Save the chat response to the generated_contents table
-                content_id = db_logger.save_generated_content(
-                    task_id=state["current_task_id"],
-                    content_type="message",
-                    title="AI Assistant Response",
-                    content=json.dumps(final_result, ensure_ascii=False)
-                )
-                if content_id:
-                    db_logger.update_job_final_output(job_id, content_id)
-            except Exception as e:
-                print(f"Error saving general chat content: {e}")
+            final_api_response["title"] = final_result.get('title', "Cook AI 助教回覆")
+            final_api_response["content"] = final_result.get('content')
+
+            db_title = final_result.get("title", "Cook AI 助教回覆")
         else:
-            final_api_response["content"] = {"message": "General chat skill executed, but no content was generated."}
+            final_api_response["display_type"] = "text_message"
+            final_api_response["content"] = {
+                "message": "General chat skill executed, but no content was generated.",
+                "debug_final_result": str(final_result)
+            }
             
     elif next_node == "summarization_skill":
-        if final_result and isinstance(final_result, dict) and "main_title" in final_result and "sections" in final_result:
+        # final_result is the entire state from the summarization_app.invoke()
+        summary_content = final_result.get("final_generated_content")
+        
+        if (summary_content and isinstance(summary_content, dict) and 
+            summary_content.get("type") == "summary" and 
+            "title" in summary_content and "sections" in summary_content):
+            
             final_api_response["display_type"] = "summary_report"
-            final_api_response["content"] = {"title": final_result["main_title"], "data": final_result}
-            try:
-                content_id = db_logger.save_generated_content(
-                    task_id=state["current_task_id"],
-                    content_type="summary",
-                    title=final_result.get("main_title", "Material Summary"),
-                    content=json.dumps(final_result, ensure_ascii=False)
-                )
-                if content_id:
-                    db_logger.update_job_final_output(job_id, content_id)
-            except Exception as e:
-                print(f"Error saving summarization content: {e}")
+            final_api_response["title"] = summary_content.get("title", "教材摘要")
+            final_api_response["content"] = summary_content.get("sections", [])
+            
+            db_title = summary_content.get("title", "教材摘要")
         else:
-            final_api_response["content"] = {"message": "Summarization skill executed, but no structured summary was generated."}
-
+            final_api_response["display_type"] = "text_message"
+            final_api_response["content"] = {
+                "message": "Summarization skill executed, but the final_result was not in the expected format.",
+                "debug_final_result": str(final_result)
+            }
+            
     elif next_node == "exam_generation_skill":
-        # Exam generation skill saves its content within its sub-graph.
-        # We need to retrieve the final_output_id from the job and then fetch the content.
-        final_output_id = db_logger.get_job_final_output_id(job_id)
-        if final_output_id:
-            retrieved_content = db_logger.get_generated_content_by_id(final_output_id)
-            if retrieved_content:
-                final_api_response["display_type"] = "exam_questions"
-                final_api_response["content"] = retrieved_content # Already contains "title" and "data"
-            else:
-                final_api_response["content"] = {"message": "Exam generation completed, but final content could not be retrieved."}
+        main_title = final_result.get("main_title") if isinstance(final_result, dict) else None
+        exam_data = final_result.get("final_generated_content") if isinstance(final_result, dict) else final_result
+        
+        if exam_data and isinstance(exam_data, list) and len(exam_data) > 0:
+            final_api_response["display_type"] = "exam_questions"
+            final_api_response["title"] = main_title if main_title else f"未命名測驗 ({datetime.now().strftime('%Y-%m-%d')})"
+            final_api_response["content"] = exam_data
+            
+            db_title = main_title if main_title else f"未命名測驗 ({datetime.now().strftime('%Y-%m-%d')})"
         else:
-            final_api_response["content"] = {"message": "Exam generation completed, but no final output ID was recorded."}
-    else:
-        final_api_response["content"] = {"message": f"Unknown skill '{next_node}' executed, no specific content handling."}
+            final_api_response["display_type"] = "text_message"
+            final_api_response["content"] = {
+                "message": "Exam generation ran, but no content was passed from the skill.",
+                "debug_final_result": str(final_result)
+            }
+            
+    else: # Fallback for unknown skills
+        final_api_response["display_type"] = "text_message"
+        final_api_response["content"] = {"message": f"Unknown skill '{next_node}' executed or no content generated."}
 
-    # Mark the job as completed (or partial_success if errors occurred in sub-graphs)
-    # The sub-graphs (like exam_generator) already update the job status to partial_success/failed if needed.
-    # Here, we just ensure it's marked completed if no top-level error.
-    if not state.get("error"):
+    # 統一資料庫儲存邏輯：儲存完整的 final_api_response
+    if db_title and final_api_response.get("display_type") != "text_message":
+        try:
+            task_id = state.get("current_task_id")
+            final_content_type = final_api_response.get("display_type", "unknown")
+            
+            content_id = None
+            if task_id:
+                content_id = db_logger.save_generated_content(
+                    task_id=task_id,
+                    content_type=final_content_type,
+                    title=db_title,
+                    content=json.dumps(final_api_response, ensure_ascii=False)
+                )
+
+            if content_id:
+                db_logger.update_job_final_output(job_id, content_id)
+            else:
+                 print(f"[DB Logger] WARNING: Could not save final content, current_task_id not found or content generation failed.")
+
+        except Exception as e:
+            print(f"[DB Logger] ERROR: Failed to save final content for {next_node}. Reason: {e}")
+            
+
+    # Update the main job status to completed if it wasn't already failed
+    current_job_status = db_logger.get_job_status(job_id)
+    if current_job_status not in ['failed', 'partial_success']:
         db_logger.update_job_status(job_id, 'completed')
     
-    return final_api_response
+    return {
+    "final_result": final_api_response
+    }
 
 # --- Graph Definition ---
 

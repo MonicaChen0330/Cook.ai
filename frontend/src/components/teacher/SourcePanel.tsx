@@ -10,8 +10,8 @@ import AddIcon from '@mui/icons-material/Add';
 
 interface SourcePanelProps {
   availableSources: Source[];
-  selectedSources: string[];
-  onSelectSource: (id: string) => void;
+  selectedSources: number[]; // Changed to number[]
+  onSelectSource: (uniqueContentId: number) => void; // Changed to number
   onUploadSuccess: () => void;
 }
 
@@ -75,7 +75,7 @@ function SourcePanel({
 
   return (
     <>
-      <div className="h-full w-full bg-theme-background rounded-xl flex flex-col relative">
+      <div className="h-full w-full bg-theme-background rounded-xl flex flex-col relative"> {/* 🎯 關鍵修正 1: 加上 relative */}
         <div className="h-full flex flex-col overflow-hidden">
           <div className="flex items-center justify-between p-4 border-b border-theme-border px-6">
             <h2 className="text-lg font-bold text-neutral-text-main">
@@ -94,8 +94,8 @@ function SourcePanel({
                   <input 
                     type="checkbox" 
                     className="form-checkbox h-4 w-4 text-theme-checkbox border-neutral-border rounded focus:ring-theme-ring" 
-                    checked={selectedSources.includes(source.id)}
-                    onChange={() => onSelectSource(source.id)}
+                    checked={selectedSources.includes(source.unique_content_id)}
+                    onChange={() => onSelectSource(source.unique_content_id)}
                   />
                   {editingId === source.id ? (
                     <form onSubmit={handleRename} className="flex-1">
@@ -110,7 +110,8 @@ function SourcePanel({
                     </form>
                   ) : (
                     <>
-                      <span className="truncate text-neutral-text-secondary flex-1 cursor-pointer" onClick={() => onSelectSource(source.id)}>
+                      <span className="truncate text-neutral-text-secondary flex-1 cursor-pointer" 
+                          onClick={() => onSelectSource(source.unique_content_id)}>
                         {source.name}
                       </span>
                       <button onClick={() => handleStartEditing(source)} className="text-neutral-icon hover:text-theme-primary">
@@ -124,17 +125,18 @@ function SourcePanel({
           </div>
         </div>
 
-        <Box 
-          sx={{
-            position: 'absolute',
-            bottom: 16,
-            right: 16,
-          }}
-          onClick={() => setIsModalOpen(true)}
+        <Box
+            sx={{
+                position: 'absolute',
+                bottom: 37,
+                right: 14,
+                borderTop: 'none',
+            }}
+            onClick={() => setIsModalOpen(true)}
         >
-          <Fab color="primary" aria-label="add">
-            <AddIcon />
-          </Fab>
+            <Fab color="primary" aria-label="add" size="medium" sx={{ boxShadow: 'none' }}>
+                <AddIcon />
+            </Fab>
         </Box>
       </div>
 
