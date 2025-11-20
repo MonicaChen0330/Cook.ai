@@ -150,8 +150,60 @@ def retrieve_chunks_node(state: ExamGenerationState) -> dict:
 @log_task(agent_name="plan_generation_tasks", task_description="Analyze user query to create a generation plan.", input_extractor=lambda state: {"query": state.get("query")})
 def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
     """Analyzes the user query to create a structured generation plan using an LLM."""
-    # This node is not supposed to run if a plan already exists.
-    if state.get("generation_plan") or state.get("final_generated_content"):
+    # --- Refinement Logic ---
+    critic_feedback = state.get("critic_feedback", [])
+    if critic_feedback:
+        latest_feedback = critic_feedback[-1]
+        if latest_feedback.get("overall_status") == "fail":
+            # Generate a Refinement Plan
+            # We need to identify which tasks need to be re-done or refined.
+            # For simplicity, we will re-generate the questions that failed.
+            
+            feedback_items = latest_feedback.get("feedback_items", []) # Should be "final_feedback" from CriticState
+            # Note: In TeacherAgentState, we store the list of feedback dicts.
+            # The structure depends on how we map CriticState to TeacherAgentState.
+            # Let's assume we store the whole CriticState output or similar.
+            
+            # Actually, let's look at how we will pass data.
+            # We need to parse the feedback to create tasks.
+            
+            refinement_tasks = []
+            for item in feedback_items:
+                # item: { "question_index": int, "type": "fact"|"quality", "feedback": [...] }
+                # We need to map index back to the specific question type/task.
+                # This is tricky if we don't track lineage.
+                # For now, let's create a generic "refine_content" task or re-generate all?
+                
+                # Simpler approach for V1:
+                # If feedback exists, we create a "refine_exam" task that takes the *entire* previous content + feedback
+                # and asks the LLM to fix it.
+                pass
+            
+            # Let's use a specific Refinement Task
+            # Note: The Task BaseModel does not support 'id', 'description', 'dependencies', 'status', 'params'.
+            # For now, we'll create a dictionary that represents this conceptual task.
+            # This will require a new node to handle 'refine_exam' type tasks.
+            refinement_plan_task = {
+                "type": "refine_exam",
+                "count": 1, # This task represents a single refinement operation
+                "topic": "Refine exam questions based on critic feedback",
+                "params": {
+                    "feedback": latest_feedback,
+                    "previous_content": state.get("final_generated_content", [])
+                } # Pass the full feedback and content for the refinement agent
+            }
+            
+            return {
+                "generation_plan": [refinement_plan_task],
+                "current_task": None,
+                "final_generated_content": [] # Clear previous content to allow overwrite/append
+            }
+
+    # If plan exists and no feedback (or feedback passed), skip
+    if state.get("generation_plan") and not critic_feedback:
+        return {}
+    
+    if state.get("final_generated_content") and not critic_feedback:
         return {}
 
     try:
@@ -206,6 +258,8 @@ def should_continue_router(state: ExamGenerationState) -> str:
     current_task = state.get("current_task")
     if current_task:
         task_type = current_task.get("type")
+        if task_type == "refine_exam":
+            return "refine_exam"
         return f"generate_{task_type}" if task_type in ["multiple_choice", "short_answer", "true_false"] else "end" # Return "end" for aggregation
     return "end" # Go to aggregation if no more tasks
 
@@ -317,6 +371,97 @@ def generate_short_answer_node(state: ExamGenerationState) -> dict:
 @log_task(agent_name="generate_true_false", task_description="Generate true/false questions.", input_extractor=lambda state: {"current_task": state.get("current_task")})
 def generate_true_false_node(state: ExamGenerationState) -> dict:
     return _generic_generate_question(state, "true_false")
+
+@log_task(agent_name="refine_exam", task_description="Refining exam questions based on feedback.", input_extractor=lambda state: {"feedback_count": len(state.get("critic_feedback", []))})
+def refine_exam_node(state: ExamGenerationState) -> dict:
+    """
+    Refines the generated exam questions based on critic feedback.
+    """
+    critic_feedback = state.get("critic_feedback", [])
+    if not critic_feedback:
+        return {"error": "No feedback found for refinement."}
+        
+    latest_feedback = critic_feedback[-1]
+    
+    # We need to access the previous content.
+    # In plan_generation_tasks_node, we cleared final_generated_content.
+    # BUT we need it for refinement.
+    # We should have preserved it or passed it in params.
+    # The task params has 'feedback'.
+    # Let's assume the state still has 'final_generated_content' because we are in a loop?
+    # No, plan_generation_tasks_node returned "final_generated_content": [] to clear it.
+    # This is a problem.
+    # The planner should NOT clear it if it's a refinement task, OR it should pass it in params.
+    # Let's assume for now we didn't clear it (I need to check plan_generation_tasks_node again).
+    # In Step 262, I added "final_generated_content": [] to the return dict.
+    # So it IS cleared.
+    
+    # I must fix plan_generation_tasks_node to NOT clear it if refining, 
+    # OR pass it to the task.
+    # Passing to task is safer.
+    
+    # But wait, I can't easily change plan_generation_tasks_node in this same tool call if I don't target it.
+    # Let's assume I will fix plan_generation_tasks_node in the next step or use a workaround.
+    # Workaround: The state passed to this node is the accumulated state.
+    # If planner returned [], then state['final_generated_content'] is [].
+    # So I MUST fix planner.
+    
+    # For now, let's implement the node assuming content is available in state or params.
+    # I'll check state.get("final_generated_content") or params.
+    
+    current_task = state.get("current_task", {})
+    params = current_task.get("params", {})
+    
+    # If content is empty, we are stuck.
+    # Let's try to recover from history?
+    # TeacherAgentState has 'final_generated_content'.
+    # But we are in ExamGenerationState.
+    # The TeacherAgent passes 'final_generated_content' down? No.
+    
+    # I will modify plan_generation_tasks_node to pass 'previous_content' in params.
+    
+    current_content = params.get("previous_content", state.get("final_generated_content", []))
+    
+    # Construct Prompt
+    feedback_str = json.dumps(latest_feedback, ensure_ascii=False, indent=2)
+    content_str = json.dumps(current_content, ensure_ascii=False, indent=2)
+    
+    system_prompt = (
+        "You are an expert educational content editor. "
+        "Your task is to refine exam questions based on specific feedback from a critic. "
+        "Ensure all output is in Traditional Chinese (繁體中文)."
+    )
+    
+    user_prompt = (
+        f"Here are the original questions:\n{content_str}\n\n"
+        f"Here is the feedback from the critic:\n{feedback_str}\n\n"
+        "Please rewrite the questions to address *all* the feedback points. "
+        "Return the FULL set of questions (including those that didn't need changes) in the same JSON format."
+    )
+    
+    llm = get_llm()
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    
+    try:
+        response = llm.invoke(messages)
+        content = response.content.strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            
+        refined_content = json.loads(content)
+        
+        # Ensure it's a list
+        if isinstance(refined_content, dict):
+             refined_content = [refined_content]
+             
+        return {
+            "final_generated_content": refined_content,
+            "current_task": None # Task done
+        }
+    except Exception as e:
+        return {"error": f"Refinement failed: {str(e)}"}
 
 def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
     """Handles any errors that occurred during the process."""

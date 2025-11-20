@@ -14,6 +14,9 @@ from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import ge
 from backend.app.agents.teacher_agent.skills.exam_generator.graph import app as exam_generator_app
 from backend.app.agents.teacher_agent.skills.general_chat.nodes import general_chat_node
 from backend.app.agents.teacher_agent.skills.summarization.graph import app as summarization_app # New import
+# TEMPORARILY DISABLED FOR TESTING - Critic integration
+# from backend.app.agents.teacher_agent.critics.graph import critic_app # Import Critic Agent
+# from backend.app.agents.teacher_agent.critics.state import CriticState # Import Critic State
 
 # --- Pydantic Model for the Router's Tool ---
 class Route(BaseModel):
@@ -121,7 +124,8 @@ def exam_skill_node(state: TeacherAgentState) -> dict:
             raise Exception(f"Exam generator skill failed: {final_skill_state['error']}")
         
         final_result = final_skill_state
-        return {"final_result": final_result}
+        generated_content = final_skill_state.get("final_generated_content")
+        return {"final_result": final_result, "final_generated_content": generated_content}
 
     except Exception as e:
         return {"error": str(e)}
@@ -145,10 +149,116 @@ def summarization_skill_node(state: TeacherAgentState) -> dict: # New skill node
             raise Exception(f"Summarization skill failed: {final_skill_state['error']}")
         
         final_result = final_skill_state
-        return {"final_result": final_result}
+        generated_content = final_skill_state.get("final_generated_content")
+        return {"final_result": final_result, "final_generated_content": generated_content}
 
     except Exception as e:
         return {"error": str(e)}
+
+# --- Critic Node --- TEMPORARILY DISABLED FOR TESTING
+# @log_task(agent_name="critic_agent", task_description="Execute the critic sub-graph.", input_extractor=lambda state: {"iteration_count": state.get("iteration_count")})
+# async def critic_node(state: TeacherAgentState) -> dict:
+#     """
+#     Executes the critic sub-graph.
+#     """
+#     try:
+#         # Prepare input for Critic
+#         # We need to pass 'content' and 'workflow_mode'
+#         # 'final_generated_content' from TeacherState is the content.
+        
+#         # Check if we have content to criticize
+#         content = state.get("final_generated_content")
+#         if not content:
+#             # If no content, we can't criticize. Skip or error?
+#             # For now, return empty feedback which will cause aggregation.
+#             return {"critic_feedback": []}
+            
+#         # Ensure content is in the expected format (List[Dict]) for the critic
+#         # If it's a dict (like from exam generator), wrap it or extract.
+#         # The exam generator returns a list of dicts (sections) or a dict.
+#         # The critic expects a list of items to iterate over.
+#         # Let's normalize it here.
+        
+#         critic_input_content = []
+#         if isinstance(content, list):
+#             critic_input_content = content
+#         elif isinstance(content, dict):
+#             # If it's a result dict, try to find the list
+#             if "content" in content and isinstance(content["content"], list):
+#                 critic_input_content = content["content"]
+#             else:
+#                 critic_input_content = [content]
+        
+#         skill_input = {
+#             "content": critic_input_content,
+#             "workflow_mode": state.get("workflow_mode", "generator_only")
+#         }
+        
+#         final_critic_state = await critic_app.ainvoke(skill_input)
+        
+#         # Extract feedback
+#         final_feedback = final_critic_state.get("final_feedback", [])
+#         overall_status = final_critic_state.get("overall_status", "pass")
+        
+#         # Update Teacher State
+#         # We append the feedback to history
+#         new_feedback_entry = {
+#             "iteration": state.get("iteration_count", 0),
+#             "overall_status": overall_status,
+#             "feedback_items": final_feedback
+#         }
+        
+#         current_history = state.get("critic_feedback", [])
+#         updated_history = current_history + [new_feedback_entry]
+        
+#         return {
+#             "critic_feedback": updated_history,
+#             "iteration_count": state.get("iteration_count", 0) + 1
+#         }
+
+#     except Exception as e:
+#         print(f"Critic failed: {e}")
+#         # If critic fails, we shouldn't block the whole flow, just log and proceed?
+#         # Or return error.
+#         return {"error": f"Critic failed: {str(e)}"}
+
+
+# --- Conditional Edge for Critic ---
+
+def should_continue_from_critic(state: TeacherAgentState) -> str:
+    """
+    Decides whether to loop back to the skill (refine) or finish.
+    """
+    feedback_history = state.get("critic_feedback", [])
+    if not feedback_history:
+        return "aggregate_output"
+        
+    latest = feedback_history[-1]
+    if latest.get("overall_status") == "pass":
+        return "aggregate_output"
+        
+    # Check iterations
+    iteration = state.get("iteration_count", 0)
+    max_iter = state.get("max_iterations", 3)
+    
+    if iteration >= max_iter:
+        print(f"Max iterations ({max_iter}) reached. Proceeding to aggregation.")
+        return "aggregate_output"
+        
+    # If failed and under limit, go back to the skill that generated the content.
+    # We need to know which skill was used.
+    # We can use 'next_node' from the state, which holds the last executed skill name (from router).
+    # Wait, 'next_node' is updated by the router. 
+    # When we come from the skill, 'next_node' might still be the skill name?
+    # Actually, the router sets 'next_node'. The skill node doesn't change it.
+    # So state['next_node'] should be "exam_generation_skill", etc.
+    
+    last_skill = state.get("next_node")
+    if last_skill in ["exam_generation_skill", "summarization_skill"]:
+        return last_skill
+        
+    return "aggregate_output"
+
 
 # --- Final Aggregation Node ---
 
@@ -267,6 +377,8 @@ builder.add_node("router", router_node)
 builder.add_node("exam_generation_skill", exam_skill_node)
 builder.add_node("general_chat_skill", general_chat_node)
 builder.add_node("summarization_skill", summarization_skill_node) # Add new skill node
+# TEMPORARILY DISABLED - Critic node
+# builder.add_node("critic_node", critic_node) # Add critic node
 builder.add_node("aggregate_output", aggregate_output_node)
 
 # Set the entry point
@@ -283,10 +395,24 @@ builder.add_conditional_edges(
     },
 )
 
-# Add edges from skill nodes to the aggregation node
-builder.add_edge("exam_generation_skill", "aggregate_output")
+# TEMPORARILY DISABLED - Critic integration (originally edges to critic_node)
+# Add edges from skill nodes directly to aggregate for testing
+builder.add_edge("exam_generation_skill", "aggregate_output")  # TEMP: Skip critic
 builder.add_edge("general_chat_skill", "aggregate_output")
-builder.add_edge("summarization_skill", "aggregate_output") # Add new skill edge
+builder.add_edge("summarization_skill", "aggregate_output")  # TEMP: Skip critic
+
+# CRITIC EDGES COMMENTED OUT FOR TESTING:
+# builder.add_edge("exam_generation_skill", "critic_node")
+# builder.add_edge("summarization_skill", "critic_node")
+# builder.add_conditional_edges(
+#     "critic_node",
+#     should_continue_from_critic,
+#     {
+#         "aggregate_output": "aggregate_output",
+#         "exam_generation_skill": "exam_generation_skill",
+#         "summarization_skill": "summarization_skill"
+#     }
+# )
 
 # The aggregation node is the final step
 builder.add_edge("aggregate_output", END)
