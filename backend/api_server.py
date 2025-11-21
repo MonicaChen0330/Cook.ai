@@ -1,7 +1,8 @@
 import os
 import shutil
 import tempfile
-from typing import Any, List
+import time
+from typing import Any, List, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, APIRouter
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
@@ -263,6 +264,287 @@ async def test_ingest_and_generate(prompt: str = Form(...), course_id: int = For
     except Exception as e:
         db_logger.update_job_status(job_id, 'failed', error_message=str(e))
         raise HTTPException(status_code=500, detail=f"[Test] An unexpected error occurred: {str(e)}")
+
+# --- Quality Critic Testing Endpoints ---
+
+class EvaluateExamRequest(BaseModel):
+    """
+    Request model for evaluating exam from generation API response.
+    
+    Accepts the direct output from exam generation API:
+    {
+        "type": "exam_questions",
+        "title": "...",
+        "job_id": 266,
+        "content": [
+            {
+                "type": "multiple_choice" | "short_answer" | "true_false" | ...,
+                "questions": [...]
+            }
+        ],
+        "display_type": "exam_questions"
+    }
+    """
+    # Accept the entire generation response (all fields optional except content)
+    type: Optional[str] = None
+    title: Optional[str] = None
+    job_id: Optional[int] = None
+    content: List[dict]  # Required - contains the actual exam content
+    display_type: Optional[str] = None
+    rag_content: Optional[str] = None  # Optional RAG context
+
+class EvaluateSingleQuestionRequest(BaseModel):
+    """Request model for evaluating a single question."""
+    question: dict
+    rag_content: str = None
+
+@testing_router.post("/critic/evaluate_exam")
+async def evaluate_exam_endpoint(request: EvaluateExamRequest):
+    """
+    **Quality Critic Test Endpoint:** Evaluate an entire exam.
+    
+    Accepts direct output from exam generation API.
+    
+    Example request body (from generation API):
+    {
+        "type": "exam_questions",
+        "title": "生成簡答題的計畫",
+        "job_id": 266,
+        "content": [
+            {
+                "type": "short_answer",
+                "questions": [
+                    {
+                        "question_number": 1,
+                        "question_text": "...",
+                        "sample_answer": "...",
+                        "source": {"page_number": "...", "evidence": "..."}
+                    }
+                ]
+            }
+        ],
+        "display_type": "exam_questions",
+        "rag_content": "Optional RAG context..."
+    }
+    
+    Supports all question types: multiple_choice, short_answer, true_false, etc.
+    """
+    try:
+        from backend.app.agents.teacher_agent.critics.quality_critic import QualityCritic
+        from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import get_llm
+        
+        # Extract the actual exam content from the generation response
+        if not request.content or len(request.content) == 0:
+            raise HTTPException(status_code=400, detail="No content found in exam")
+        
+        # Get the first content item (usually there's only one)
+        exam_content = request.content[0]
+        
+        # Validate structure
+        if "questions" not in exam_content:
+            raise HTTPException(status_code=400, detail="No questions found in content")
+        
+        # Prepare exam in the format expected by QualityCritic
+        exam = {
+            "type": exam_content.get("type", "unknown"),  # multiple_choice, short_answer, etc.
+            "questions": exam_content["questions"]
+        }
+        
+        llm = get_llm()
+        critic = QualityCritic(llm, threshold=4.0)
+        
+        result = await critic.evaluate_exam(
+            exam=exam,
+            rag_content=request.rag_content
+        )
+        
+        # Add metadata from generation response
+        result["exam_metadata"] = {
+            "title": request.title,
+            "job_id": request.job_id,
+            "question_type": exam_content.get("type")
+        }
+        
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+
+@testing_router.post("/critic/evaluate_single_question")
+async def evaluate_single_question_endpoint(request: EvaluateSingleQuestionRequest):
+    """
+    **Quality Critic Test Endpoint:** Evaluate a single question.
+    
+    Example request body:
+    {
+        "question": {
+            "question_number": 1,
+            "question_text": "...",
+            "sample_answer": "..." (for short_answer),
+            OR
+            "options": {"A": "...", "B": "..."} (for multiple_choice),
+            "correct_answer": "A",
+            "source": {"page_number": "...", "evidence": "..."}
+        },
+        "rag_content": "Optional educational material context..."
+    }
+    """
+    try:
+        from backend.app.agents.teacher_agent.critics.quality_critic import QualityCritic
+        from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import get_llm
+        
+        llm = get_llm()
+        critic = QualityCritic(llm, threshold=4.0)
+        
+        result = await critic.evaluate_single_question(
+            question=request.question,
+            rag_content=request.rag_content
+        )
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+
+# --- Quality Critic: Evaluate by Job ID (Database Integration) ---
+
+class EvaluateByJobRequest(BaseModel):
+    """Request model for evaluating exam by job_id from database."""
+    job_id: int = Field(..., description="Job ID from ORCHESTRATION_JOBS table")
+    mode: str = Field("quick", description="Evaluation mode: 'quick' (overall only) or 'comprehensive' (full analysis)")
+
+@testing_router.post("/critic/evaluate_by_job")
+async def evaluate_by_job_endpoint(request: EvaluateByJobRequest):
+    """
+    **Quality Critic Endpoint:** Evaluate generated content by job_id with mode selection.
+    
+    Modes:
+    - quick: Overall evaluation only (cost-effective, default)
+    - comprehensive: Overall + per-question + statistics (full analysis)
+    
+    Automatically fetches:
+    1. Generated content from GENERATED_CONTENTS
+    2. RAG chunks from DOCUMENT_CHUNKS (via retriever agent tasks)
+    
+    Example:
+    {
+        "job_id": 268,
+        "mode": "quick"
+    }
+    
+    Note: Evaluation results are automatically saved to database.
+    """
+    import time
+    import json
+    start_time = time.time()
+    
+    try:
+        from backend.app.agents.teacher_agent.critics.quality_critic import QualityCritic
+        from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import get_llm
+        from backend.app.agents.teacher_agent.critics.critic_db_utils import (
+            get_generated_content_by_job_id,
+            get_rag_chunks_by_job_id,
+            save_evaluation_to_db
+        )
+        from backend.app.agents.teacher_agent.critics.critic_formatters import EvaluationFormatter
+        
+        # Step 1: Get generated content
+        content_data = get_generated_content_by_job_id(request.job_id)
+        if not content_data:
+            raise HTTPException(status_code=404, detail=f"No content found for job_id {request.job_id}")
+        
+        # Step 2: Parse and merge all question types
+        content = content_data["content"]
+        all_questions = []
+        
+        if isinstance(content, dict) and "content" in content:
+            exam_data = content["content"]
+            if isinstance(exam_data, list):
+                for question_block in exam_data:
+                    all_questions.extend(question_block.get("questions", []))
+        elif isinstance(content, list):
+            for question_block in content:
+                all_questions.extend(question_block.get("questions", []))
+        elif isinstance(content, dict) and "questions" in content:
+            all_questions = content["questions"]
+        
+        if not all_questions:
+            raise HTTPException(status_code=400, detail="No questions found in content")
+        
+        # Renumber questions globally
+        for idx, q in enumerate(all_questions, start=1):
+            q["question_number"] = idx
+        
+        exam = {
+            "type": "exam",
+            "questions": all_questions
+        }
+        
+        # Step 3: Get RAG context (using job_id to find retriever tasks)
+        rag_chunks = get_rag_chunks_by_job_id(request.job_id, limit=10)
+        rag_content = None
+        if rag_chunks:
+            combined = [f"[頁 {c.get('metadata', {}).get('page_number', '?')}] {c['chunk_text']}" 
+                       for c in rag_chunks]
+            rag_content = "\n\n".join(combined)
+        
+        # Step 4: Run evaluation
+        llm = get_llm()
+        critic = QualityCritic(llm=llm, threshold=4.0)
+        
+        start_time = time.time()
+        evaluation = await critic.evaluate_exam(
+            exam=exam,
+            rag_content=rag_content,
+            mode=request.mode
+        )
+        
+        duration_ms = int((time.time() - start_time) * 1000)
+        
+        # Step 5: Use EvaluationFormatter to transform data
+        num_questions = len(all_questions)
+        
+        # Format for frontend (API response)
+        response = EvaluationFormatter.for_frontend(evaluation, num_questions)
+        
+        # Step 6: Save to database
+        # Format for revise agent
+        feedback_for_generator = EvaluationFormatter.for_revise_agent(evaluation)
+        
+        # Format for metrics/analytics
+        metrics_detail = EvaluationFormatter.for_metrics(evaluation, duration_ms, num_questions)
+        
+        # Determine evaluation_mode
+        evaluation_mode = f"exam_{request.mode}"
+        
+        save_result = save_evaluation_to_db(
+            job_id=request.job_id,
+            parent_task_id=content_data["source_agent_task_id"],
+            evaluation_result=evaluation,  # Complete evaluation stored in AGENT_TASKS.output
+            duration_ms=duration_ms,
+            is_passed=metrics_detail["is_passed"],
+            feedback=feedback_for_generator,
+            metrics_detail=metrics_detail,
+            evaluation_mode=evaluation_mode
+        )
+        
+        if save_result:
+            eval_task_id, task_eval_id = save_result
+            response["saved"] = {
+                "evaluation_task_id": eval_task_id,
+                "task_evaluation_id": task_eval_id
+            }
+
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
+
 
 # --- Root, Health Check, and Router Registration ---
 
