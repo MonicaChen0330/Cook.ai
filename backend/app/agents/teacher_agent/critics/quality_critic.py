@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Dict, List, Any, Optional
@@ -456,3 +457,208 @@ evidence: "使用如 KNN（K-Nearest Neighbors）等算法，根據相似記錄�
             result = await self.evaluate(content, criteria)
             results.append(result)
         return results
+
+    async def evaluate_exam(
+        self, 
+        exam: Dict[str, Any], 
+        rag_content: str = None,
+        criteria: List[str] = None,
+        mode: str = "quick"
+    ) -> Dict[str, Any]:
+        """
+        Evaluate an entire exam with different evaluation modes.
+        
+        Args:
+            exam: Exam content with structure:
+                {
+                    "type": "multiple_choice" or "exam",
+                    "questions": [
+                        {"question_number": 1, "question_text": "...", ...},
+                        {"question_number": 2, ...},
+                        ...
+                    ]
+                }
+            rag_content: Optional RAG context (retrieved educational material)
+            criteria: List of criteria names to evaluate. If None, evaluates all rubrics.
+            mode: Evaluation mode:
+                - "quick" (default): Only overall evaluation, cost-effective
+                - "comprehensive": Overall + per-question + statistics
+        
+        Returns:
+            Dict with structure:
+            {
+                "mode": str,                # Evaluation mode used
+                "overall": {...},           # Overall exam assessment
+                "per_question": [...],      # Individual assessments (comprehensive only)
+                "statistics": {...}         # Summary statistics (comprehensive only)
+            }
+        
+        Example:
+            # Quick mode (default)
+            result = await critic.evaluate_exam(exam, rag_content="...", mode="quick")
+            
+            # Comprehensive mode
+            result = await critic.evaluate_exam(exam, rag_content="...", mode="comprehensive")
+        """
+        # Add rag_content to exam if provided
+        if rag_content:
+            exam["rag_content"] = rag_content
+        
+        all_questions = exam.get("questions", [])
+        results = {"mode": mode}
+        
+        # 1. Overall exam evaluation (always performed)
+        logger.info(f"[{mode.upper()} MODE] Evaluating exam with {len(all_questions)} questions at exam-level")
+        results["overall"] = await self.evaluate(exam, criteria)
+        
+        # 2. Per-question evaluation (comprehensive mode only)
+        if mode == "comprehensive":
+            logger.info(f"[COMPREHENSIVE MODE] Evaluating all {len(all_questions)} questions individually")
+            
+            # Create evaluation tasks for all questions (concurrent)
+            eval_tasks = []
+            for q in all_questions:
+                single_q = {
+                    "type": "multiple_choice",
+                    "questions": [q]
+                }
+                # Pass rag_content to individual questions too
+                if rag_content:
+                    single_q["rag_content"] = rag_content
+                eval_tasks.append(self.evaluate(single_q, criteria))
+            
+            # Execute all evaluations concurrently
+            question_results = await asyncio.gather(*eval_tasks, return_exceptions=True)
+            
+            # Format results
+            results["per_question"] = []
+            for i, (q, q_result) in enumerate(zip(all_questions, question_results)):
+                if isinstance(q_result, Exception):
+                    logger.error(f"Error evaluating question {q.get('question_number', i+1)}: {q_result}")
+                    results["per_question"].append({
+                        "question_number": q.get("question_number", i + 1),
+                        "error": str(q_result),
+                        "evaluations": []
+                    })
+                else:
+                    results["per_question"].append({
+                        "question_number": q.get("question_number", i + 1),
+                        "evaluations": q_result.get("evaluations", [])
+                    })
+            
+            # Compute statistics
+            results["statistics"] = self._compute_exam_statistics(results["per_question"])
+        else:
+            logger.info(f"[QUICK MODE] Skipping per-question evaluation")
+            results["per_question"] = []
+            results["statistics"] = {
+                "note": f"Per-question evaluation skipped in {mode} mode"
+            }
+        
+        return results
+    
+    async def evaluate_single_question(
+        self,
+        question: Dict[str, Any],
+        rag_content: str = None,
+        criteria: List[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Evaluate a single question.
+        
+        This is a simplified API for unit testing individual questions.
+        
+        Args:
+            question: Single question dict with structure:
+                {
+                    "question_number": 1,
+                    "question_text": "...",
+                    "options": {"A": "...", "B": "..."},
+                    "correct_answer": "A",
+                    "source": {"page_number": "...", "evidence": "..."}
+                }
+            rag_content: Optional RAG context (retrieved educational material)
+            criteria: List of criteria names to evaluate. If None, evaluates all rubrics.
+        
+        Returns:
+            Dict with evaluation results for the single question
+        
+        Example:
+            result = await critic.evaluate_single_question(question, rag_content="...")
+        """
+        # Wrap question in expected format
+        content = {
+            "type": "multiple_choice",
+            "questions": [question]
+        }
+        
+        # Add rag_content if provided
+        if rag_content:
+            content["rag_content"] = rag_content
+        
+        # Evaluate using the core evaluate method
+        return await self.evaluate(content, criteria)
+    
+    def _compute_exam_statistics(self, per_question_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Compute summary statistics from per-question evaluation results.
+        
+        Args:
+            per_question_results: List of per-question evaluation results
+        
+        Returns:
+            Dict containing statistics:
+            {
+                "total_questions": int,
+                "avg_scores_by_criteria": {"Understandable": 3.5, ...},
+                "min_scores_by_criteria": {"Understandable": 2, ...},
+                "max_scores_by_criteria": {"Understandable": 5, ...},
+                "questions_below_threshold": [1, 3, 5]  # Question numbers
+            }
+        """
+        if not per_question_results:
+            return {}
+        
+        # Aggregate scores by criteria
+        criteria_scores = {}
+        questions_below_threshold = []
+        
+        for q_result in per_question_results:
+            if "error" in q_result or not q_result.get("evaluations"):
+                continue
+            
+            question_num = q_result.get("question_number")
+            has_low_score = False
+            
+            for eval_item in q_result["evaluations"]:
+                criteria = eval_item.get("criteria")
+                rating = eval_item.get("rating", 0)
+                
+                if criteria:
+                    if criteria not in criteria_scores:
+                        criteria_scores[criteria] = []
+                    criteria_scores[criteria].append(rating)
+                
+                # Check if any score is below threshold
+                if rating < self.threshold:
+                    has_low_score = True
+            
+            if has_low_score and question_num:
+                questions_below_threshold.append(question_num)
+        
+        # Compute statistics
+        stats = {
+            "total_questions": len(per_question_results),
+            "avg_scores_by_criteria": {},
+            "min_scores_by_criteria": {},
+            "max_scores_by_criteria": {},
+            "questions_below_threshold": questions_below_threshold
+        }
+        
+        for criteria, scores in criteria_scores.items():
+            if scores:
+                stats["avg_scores_by_criteria"][criteria] = round(sum(scores) / len(scores), 2)
+                stats["min_scores_by_criteria"][criteria] = min(scores)
+                stats["max_scores_by_criteria"][criteria] = max(scores)
+        
+        return stats

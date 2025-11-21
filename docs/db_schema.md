@@ -162,19 +162,20 @@ erDiagram
         INTEGER source_id PK "e.g., unique_content_id or document_chunk_id"
     }
     
-    %% 11/08 已建立
+    %% 11/21 已更新
     TASK_EVALUATIONS {
         INTEGER id PK
         INTEGER task_id FK "-> AGENT_TASKS.id"
+        INTEGER job_id FK "-> ORCHESTRATION_JOBS.id (新增，快速查詢)"
         
-        %% --- 評估階段 ---
+        %% --- 評估階段與模式 ---
         INTEGER evaluation_stage "評估階段 (1=Fact, 2=Quality)"
-        VARCHAR(50) critic_type "'fact_critic' or 'quality_critic'"
+        VARCHAR(50) evaluation_mode "評估模式 (exam_quick, exam_comprehensive, summary_quick, etc.)"
         
         %% --- 評估結果 ---
         BOOLEAN is_passed "此階段是否通過"
-        TEXT feedback_for_generator "給 Generator 的具體修改建議 (用於下一輪迭代)"
-        JSON metric_details "儲存 Ragas 或 G-Eval 的所有細項分數"
+        JSONB feedback_for_generator "給 Revise Agent 的結構化反饋 (failed_criteria, suggestions)"
+        JSONB metric_details "實驗分析用數據 (scores, mode, threshold)"
         
         DATETIME evaluated_at "評估時間"
     }
