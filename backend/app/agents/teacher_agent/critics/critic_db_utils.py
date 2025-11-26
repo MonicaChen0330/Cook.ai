@@ -6,6 +6,9 @@ from sqlalchemy import select, insert, update
 from sqlalchemy.orm import Session
 from datetime import datetime, timezone, timedelta
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 from backend.app.utils.db_logger import (
     engine, 
@@ -23,7 +26,7 @@ try:
     document_chunks = Table('document_chunks', metadata, autoload_with=engine)
     task_evaluations = Table('task_evaluations', metadata, autoload_with=engine)
 except Exception as e:
-    print(f"Warning: Could not reflect tables: {e}")
+    logger.warning(f"Could not reflect tables: {e}")
     document_chunks = None
     task_evaluations = None
 
@@ -56,15 +59,15 @@ def get_generated_content_by_job_id(job_id: int) -> Optional[Dict[str, Any]]:
             job_result = conn.execute(job_stmt).fetchone()
             
             if not job_result:
-                print(f"[Critic DB] Job {job_id} not found")
+                logger.info(f"Job {job_id} not found")
                 return None
             
             if job_result.status != 'completed':
-                print(f"[Critic DB] Job {job_id} not completed (status: {job_result.status})")
+                logger.info(f"Job {job_id} not completed (status: {job_result.status})")
                 return None
             
             if not job_result.final_output_id:
-                print(f"[Critic DB] Job {job_id} has no final_output_id")
+                logger.info(f"Job {job_id} has no final_output_id")
                 return None
             
             # Step 2: Get generated content
@@ -80,7 +83,7 @@ def get_generated_content_by_job_id(job_id: int) -> Optional[Dict[str, Any]]:
             content_result = conn.execute(content_stmt).fetchone()
             
             if not content_result:
-                print(f"[Critic DB] Content {job_result.final_output_id} not found")
+                logger.info(f"Content {job_result.final_output_id} not found")
                 return None
             
             return {
@@ -95,7 +98,7 @@ def get_generated_content_by_job_id(job_id: int) -> Optional[Dict[str, Any]]:
             }
             
     except Exception as e:
-        print(f"[Critic DB] ERROR retrieving content for job {job_id}: {e}")
+        logger.error(f"ERROR retrieving content for job {job_id}: {e}")
         return None
 
 
@@ -114,7 +117,7 @@ def get_rag_chunks_by_task_id(task_id: int, limit: int = 10) -> List[Dict[str, A
         - metadata: dict (contains page_number, etc.)
     """
     if document_chunks is None:
-        print("[Critic DB] document_chunks table not available")
+        logger.warning("document_chunks table not available")
         return []
     
     try:
@@ -153,11 +156,11 @@ def get_rag_chunks_by_task_id(task_id: int, limit: int = 10) -> List[Dict[str, A
                 for row in results
             ]
             
-            print(f"[Critic DB] Retrieved {len(chunks)} chunks for task {task_id}")
+            logger.info(f"Retrieved {len(chunks)} chunks for task {task_id}")
             return chunks
             
     except Exception as e:
-        print(f"[Critic DB] ERROR retrieving chunks for task {task_id}: {e}")
+        logger.error(f"ERROR retrieving chunks for task {task_id}: {e}")
         return []
 
 
@@ -176,7 +179,7 @@ def get_rag_chunks_by_job_id(job_id: int, limit: int = 10) -> List[Dict[str, Any
         - metadata: dict
     """
     if document_chunks is None:
-        print("[Critic DB] document_chunks table not available")
+        logger.warning("document_chunks table not available")
         return []
     
     try:
@@ -224,11 +227,11 @@ def get_rag_chunks_by_job_id(job_id: int, limit: int = 10) -> List[Dict[str, Any
                 for row in results
             ]
             
-            print(f"[Critic DB] Retrieved {len(chunks)} chunks for job {job_id} (via retriever tasks)")
+            logger.info(f"Retrieved {len(chunks)} chunks for job {job_id} (via retriever tasks)")
             return chunks
             
     except Exception as e:
-        print(f"[Critic DB] ERROR retrieving chunks for job {job_id}: {e}")
+        logger.error(f"ERROR retrieving chunks for job {job_id}: {e}")
         import traceback
         traceback.print_exc()
         return []
@@ -264,7 +267,7 @@ def save_evaluation_to_db(
         Tuple of (agent_task_id, task_evaluation_id) if successful, None otherwise
     """
     if task_evaluations is None:
-        print("[Critic DB] task_evaluations table not available")
+        logger.warning("task_evaluations table not available")
         return None
     
     try:
@@ -274,13 +277,13 @@ def save_evaluation_to_db(
                 job_id=job_id,
                 parent_task_id=parent_task_id,
                 iteration_number=1,
-                agent_name='quality_critic',
-                task_description='質量評估',
+                agent_name='quality_critic_db',
+                task_description='Save quality evaluation results to database',
                 task_input={"job_id": job_id, "parent_task_id": parent_task_id},
                 output=evaluation_result,
                 status='completed',
                 duration_ms=duration_ms,
-                model_name='gpt-4o',  # Should ideally be passed as parameter
+                # model_name intentionally not set (this is a DB save operation, not LLM call)
                 created_at=datetime.now(TAIPEI_TZ),
                 completed_at=datetime.now(TAIPEI_TZ)
             ).returning(agent_tasks.c.id)
@@ -305,11 +308,11 @@ def save_evaluation_to_db(
             
             conn.commit()
             
-            print(f"[Critic DB] Saved evaluation: task_id={evaluation_task_id}, eval_id={task_evaluation_id}")
+            logger.info(f"Saved evaluation: task_id={evaluation_task_id}, eval_id={task_evaluation_id}")
             return (evaluation_task_id, task_evaluation_id)
             
     except Exception as e:
-        print(f"[Critic DB] ERROR saving evaluation for job {job_id}: {e}")
+        logger.error(f"ERROR saving evaluation for job {job_id}: {e}")
         import traceback
         traceback.print_exc()
         return None

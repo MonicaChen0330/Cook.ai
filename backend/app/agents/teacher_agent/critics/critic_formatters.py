@@ -59,6 +59,7 @@ class EvaluationFormatter:
         if mode == "comprehensive":
             per_question = evaluation.get("per_question", [])
             for question_eval in per_question:
+                question_type = question_eval.get("question_type", "unknown")
                 question_num = question_eval.get("question_number")
                 failed_evals = [e for e in question_eval.get("evaluations", []) 
                               if e.get("rating", 0) < 4.0]
@@ -74,6 +75,7 @@ class EvaluationFormatter:
                     
                     revision_instructions.append({
                         "target": f"question_{question_num}",
+                        "question_type": question_type,
                         "question_number": question_num,
                         "issues": question_issues
                     })
@@ -146,6 +148,7 @@ class EvaluationFormatter:
             # Per-question scores
             metrics["per_question_scores"] = [
                 {
+                    "question_type": q.get("question_type", "unknown"),
                     "question_number": q["question_number"],
                     "scores": {e["criteria"]: e["rating"] for e in q.get("evaluations", [])},
                     "avg_score": round(
@@ -214,6 +217,7 @@ class EvaluationFormatter:
         if mode == "comprehensive":
             response["per_question_evaluation"] = [
                 {
+                    "question_type": q.get("question_type", "unknown"),
                     "question_number": q["question_number"],
                     "evaluations": [
                         {

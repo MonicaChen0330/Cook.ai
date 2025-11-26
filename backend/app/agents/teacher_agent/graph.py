@@ -1,10 +1,13 @@
 import time
 import json
-from typing import Literal
+import logging
+from typing import Literal, Dict, Any, List
 from pydantic import BaseModel, Field
 from datetime import datetime
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import SystemMessage, HumanMessage
+
+logger = logging.getLogger(__name__)
 
 from .state import TeacherAgentState
 from backend.app.utils import db_logger
@@ -61,7 +64,7 @@ def router_node(state: TeacherAgentState) -> dict:
         chosen_route = Route(**response.tool_calls[0]['args'])
         next_node = chosen_route.next_skill
         
-        print(f"LLM Router decided: {next_node}")
+        logger.info(f"LLM Router decided: {next_node}")
 
         token_usage = response.response_metadata.get("token_usage", {})
         prompt_tokens = token_usage.get("prompt_tokens", 0)
@@ -80,7 +83,7 @@ def router_node(state: TeacherAgentState) -> dict:
 
     except Exception as e:
         # Fallback to keyword routing if LLM router fails
-        print(f"LLM router failed: {e}. Falling back to keyword routing.")
+        logger.warning(f"LLM router failed: {e}. Falling back to keyword routing.")
         exam_keywords = ["exam", "test", "quiz", "考卷", "測驗", "題目"]
         summarize_keywords = ["summarize", "summary", "overview", "總結", "重點", "概述"] # New keywords for fallback
         
@@ -155,72 +158,195 @@ def summarization_skill_node(state: TeacherAgentState) -> dict: # New skill node
     except Exception as e:
         return {"error": str(e)}
 
-# --- Critic Node --- TEMPORARILY DISABLED FOR TESTING
-# @log_task(agent_name="critic_agent", task_description="Execute the critic sub-graph.", input_extractor=lambda state: {"iteration_count": state.get("iteration_count")})
-# async def critic_node(state: TeacherAgentState) -> dict:
-#     """
-#     Executes the critic sub-graph.
-#     """
-#     try:
-#         # Prepare input for Critic
-#         # We need to pass 'content' and 'workflow_mode'
-#         # 'final_generated_content' from TeacherState is the content.
-        
-#         # Check if we have content to criticize
-#         content = state.get("final_generated_content")
-#         if not content:
-#             # If no content, we can't criticize. Skip or error?
-#             # For now, return empty feedback which will cause aggregation.
-#             return {"critic_feedback": []}
-            
-#         # Ensure content is in the expected format (List[Dict]) for the critic
-#         # If it's a dict (like from exam generator), wrap it or extract.
-#         # The exam generator returns a list of dicts (sections) or a dict.
-#         # The critic expects a list of items to iterate over.
-#         # Let's normalize it here.
-        
-#         critic_input_content = []
-#         if isinstance(content, list):
-#             critic_input_content = content
-#         elif isinstance(content, dict):
-#             # If it's a result dict, try to find the list
-#             if "content" in content and isinstance(content["content"], list):
-#                 critic_input_content = content["content"]
-#             else:
-#                 critic_input_content = [content]
-        
-#         skill_input = {
-#             "content": critic_input_content,
-#             "workflow_mode": state.get("workflow_mode", "generator_only")
-#         }
-        
-#         final_critic_state = await critic_app.ainvoke(skill_input)
-        
-#         # Extract feedback
-#         final_feedback = final_critic_state.get("final_feedback", [])
-#         overall_status = final_critic_state.get("overall_status", "pass")
-        
-#         # Update Teacher State
-#         # We append the feedback to history
-#         new_feedback_entry = {
-#             "iteration": state.get("iteration_count", 0),
-#             "overall_status": overall_status,
-#             "feedback_items": final_feedback
-#         }
-        
-#         current_history = state.get("critic_feedback", [])
-#         updated_history = current_history + [new_feedback_entry]
-        
-#         return {
-#             "critic_feedback": updated_history,
-#             "iteration_count": state.get("iteration_count", 0) + 1
-#         }
 
-#     except Exception as e:
-#         print(f"Critic failed: {e}")
-#         # If critic fails, we shouldn't block the whole flow, just log and proceed?
-#         # Or return error.
-#         return {"error": f"Critic failed: {str(e)}"}
+# --- Quality Critic Node ---
+
+@log_task(
+    agent_name="quality_critic", 
+    task_description="Evaluate generated content quality.",
+    input_extractor=lambda state: {
+        "iteration_count": state.get("iteration_count", 1),
+        "job_id": state.get("job_id")
+    }
+)
+async def quality_critic_node(state: TeacherAgentState) -> dict:
+    """
+    Evaluates the generated content using Quality Critic.
+    
+    This node:
+    1. Retrieves generated content from state
+    2. Runs quality evaluation
+    3. Extracts feedback for the generator
+    4. Returns evaluation results and feedback
+    """
+    import time
+    
+    job_id = state.get("job_id")
+    iteration = state.get("iteration_count", 1)
+    
+    logger.info(f"Starting evaluation (Iteration {iteration})")
+    logger.info(f"Job ID: {job_id}")
+    
+    start_time = time.perf_counter()
+    
+    try:
+        from backend.app.agents.teacher_agent.critics.quality_critic import QualityCritic
+        from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import get_llm
+        from backend.app.agents.teacher_agent.critics.critic_db_utils import (
+            get_rag_chunks_by_job_id,
+            save_evaluation_to_db
+        )
+        from backend.app.agents.teacher_agent.critics.critic_formatters import EvaluationFormatter
+        
+        # Get evaluation mode from env or default
+        mode = "quick"  # For now, always use quick mode to save costs
+        
+        # Step 1: Get generated content from state (not database, as it's not saved yet)
+        final_result = state.get("final_result")
+        if not final_result:
+            raise Exception(f"No final_result in state for job_id {job_id}")
+        
+        # Build content structure for critic based on skill type
+        next_node = state.get("next_node")
+        
+        if next_node == "exam_generation_skill":
+            # Extract exam content from final_result
+            exam_data = final_result.get("final_generated_content")
+            if not exam_data or not isinstance(exam_data, list):
+                raise Exception("No exam content found in final_result")
+            
+            # Build the content structure that aggregate_output would create
+            content = {
+                "display_type": "exam_questions",
+                "content": exam_data
+            }
+            display_type = "exam_questions"
+            
+        elif next_node == "summarization_skill":
+            # Extract summary content from final_result
+            summary_content = final_result.get("final_generated_content")
+            if not summary_content:
+                raise Exception("No summary content found in final_result")
+            
+            # Build the content structure
+            content = {
+                "display_type": "summary_report",
+                "content": summary_content.get("sections", [])
+            }
+            display_type = "summary_report"
+        else:
+            raise Exception(f"Unsupported skill type: {next_node}")
+        
+        logger.info(f"Content type: {display_type}")
+        
+        # Step 2: Get RAG context
+        rag_chunks = get_rag_chunks_by_job_id(job_id, limit=10)
+        rag_content = None
+        if rag_chunks:
+            combined = [f"[頁 {c.get('metadata', {}).get('page_number', '?')})] {c['chunk_text']}" 
+                       for c in rag_chunks]
+            rag_content = "\n\n".join(combined)
+        
+        # Step 3: Initialize critic
+        llm = get_llm()
+        critic = QualityCritic(llm=llm, threshold=4.0)
+        
+        eval_start_time = time.time()
+        
+        # Step 4: Run evaluation based on content type
+        if display_type == "exam_questions":
+            # Parse exam questions
+            all_questions = []
+            if isinstance(content, dict) and "content" in content:
+                exam_data = content["content"]
+                if isinstance(exam_data, list):
+                    for question_block in exam_data:
+                        question_type = question_block.get("type", "unknown")
+                        questions = question_block.get("questions", [])
+                        for q in questions:
+                            q["question_type"] = question_type
+                        all_questions.extend(questions)
+            
+            if not all_questions:
+                raise Exception("No questions found in exam content")
+            
+            exam = {"type": "exam", "questions": all_questions}
+            
+            # Evaluate exam (async)
+            evaluation = await critic.evaluate_exam(
+                exam=exam,
+                rag_content=rag_content,
+                mode=mode
+            )
+            
+            num_items = len(all_questions)
+            evaluation_mode = f"exam_{mode}"
+            
+        elif display_type == "summary_report":
+            # Evaluate summary (async)
+            raw_evaluation = await critic.evaluate(
+                content=content,
+                criteria=None
+            )
+            
+            # Wrap for formatter compatibility
+            evaluation = {
+                "mode": "quick",
+                "overall": raw_evaluation,
+                "per_question": [],
+                "statistics": {"note": "Summary evaluation"}
+            }
+            
+            num_items = len(content.get("content", []))
+            evaluation_mode = "summary_quick"
+        else:
+            raise Exception(f"Unsupported content type: {display_type}")
+        
+        duration_ms = int((time.time() - eval_start_time) * 1000)
+        
+        # Step 5: Format evaluation results
+        feedback_for_generator = EvaluationFormatter.for_revise_agent(evaluation)
+        metrics_detail = EvaluationFormatter.for_metrics(evaluation, duration_ms, num_items)
+        
+        is_passed = metrics_detail["is_passed"]
+        failed_criteria = metrics_detail.get("failed_criteria", [])
+        
+        logger.info("Evaluation complete:")
+        logger.info(f"  - Passed: {is_passed}")
+        logger.info(f"  - Failed criteria: {failed_criteria}")
+        logger.info(f"  - Duration: {duration_ms}ms")
+        
+        # Step 6: Save to database
+        # Use the parent_task_id from state (which is the generator's task_id)
+        parent_task_id = state.get("parent_task_id")
+        
+        save_result = save_evaluation_to_db(
+            job_id=job_id,
+            parent_task_id=parent_task_id,
+            evaluation_result=evaluation,
+            duration_ms=duration_ms,
+            is_passed=is_passed,
+            feedback=feedback_for_generator,
+            metrics_detail=metrics_detail,
+            evaluation_mode=evaluation_mode
+        )
+        
+        if save_result:
+            eval_task_id, task_eval_id = save_result
+            logger.info(f"Saved evaluation (task_id={eval_task_id}, eval_id={task_eval_id})")
+        
+        # Return evaluation results to state
+        return {
+            "critic_passed": is_passed,
+            "critic_feedback": feedback_for_generator,
+            "critic_metrics": metrics_detail
+        }
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"ERROR: {str(e)}")
+        traceback.print_exc()
+        return {"error": f"Quality critic failed: {str(e)}"}
 
 
 # --- Conditional Edge for Critic ---
@@ -242,7 +368,7 @@ def should_continue_from_critic(state: TeacherAgentState) -> str:
     max_iter = state.get("max_iterations", 3)
     
     if iteration >= max_iter:
-        print(f"Max iterations ({max_iter}) reached. Proceeding to aggregation.")
+        logger.info(f"Max iterations ({max_iter}) reached. Proceeding to aggregation.")
         return "aggregate_output"
         
     # If failed and under limit, go back to the skill that generated the content.
@@ -353,16 +479,19 @@ def aggregate_output_node(state: TeacherAgentState) -> dict:
             if content_id:
                 db_logger.update_job_final_output(job_id, content_id)
             else:
-                 print(f"[DB Logger] WARNING: Could not save final content, current_task_id not found or content generation failed.")
+                logger.warning("Could not save final content, current_task_id not found or content generation failed.")
 
         except Exception as e:
-            print(f"[DB Logger] ERROR: Failed to save final content for {next_node}. Reason: {e}")
+            logger.error(f"Failed to save final content for {next_node}. Reason: {e}")
             
 
     # Update the main job status to completed if it wasn't already failed
     current_job_status = db_logger.get_job_status(job_id)
     if current_job_status not in ['failed', 'partial_success']:
         db_logger.update_job_status(job_id, 'completed')
+    
+    # Update job with cumulative metrics (tokens, cost, iterations)
+    db_logger.update_job_iterations_and_cost(job_id)
     
     return {
     "final_result": final_api_response
@@ -376,9 +505,8 @@ builder = StateGraph(TeacherAgentState)
 builder.add_node("router", router_node)
 builder.add_node("exam_generation_skill", exam_skill_node)
 builder.add_node("general_chat_skill", general_chat_node)
-builder.add_node("summarization_skill", summarization_skill_node) # Add new skill node
-# TEMPORARILY DISABLED - Critic node
-# builder.add_node("critic_node", critic_node) # Add critic node
+builder.add_node("summarization_skill", summarization_skill_node)
+builder.add_node("quality_critic", quality_critic_node)  # Add critic node
 builder.add_node("aggregate_output", aggregate_output_node)
 
 # Set the entry point
@@ -391,28 +519,20 @@ builder.add_conditional_edges(
     {
         "exam_generation_skill": "exam_generation_skill",
         "general_chat_skill": "general_chat_skill",
-        "summarization_skill": "summarization_skill", # Add new skill to edges
+        "summarization_skill": "summarization_skill",
     },
 )
 
-# TEMPORARILY DISABLED - Critic integration (originally edges to critic_node)
-# Add edges from skill nodes directly to aggregate for testing
-builder.add_edge("exam_generation_skill", "aggregate_output")  # TEMP: Skip critic
+# Connect skills to critic or aggregate
+# General chat bypasses critic (no quality evaluation needed for chat)
 builder.add_edge("general_chat_skill", "aggregate_output")
-builder.add_edge("summarization_skill", "aggregate_output")  # TEMP: Skip critic
 
-# CRITIC EDGES COMMENTED OUT FOR TESTING:
-# builder.add_edge("exam_generation_skill", "critic_node")
-# builder.add_edge("summarization_skill", "critic_node")
-# builder.add_conditional_edges(
-#     "critic_node",
-#     should_continue_from_critic,
-#     {
-#         "aggregate_output": "aggregate_output",
-#         "exam_generation_skill": "exam_generation_skill",
-#         "summarization_skill": "summarization_skill"
-#     }
-# )
+# Exam and summary go through quality critic
+builder.add_edge("exam_generation_skill", "quality_critic")
+builder.add_edge("summarization_skill", "quality_critic")
+
+# For now, critic always goes to aggregate (no retry yet)
+builder.add_edge("quality_critic", "aggregate_output")
 
 # The aggregation node is the final step
 builder.add_edge("aggregate_output", END)
