@@ -29,6 +29,8 @@ class TeacherAgentState(TypedDict):
 
     # --- Generator-Critic Fields ---
     critic_feedback: List[Dict[str, Any]] # History of feedback from the critic
+    critic_passed: Optional[bool] # Whether the latest critic evaluation passed
+    critic_metrics: Optional[Dict[str, Any]] # Latest critic evaluation metrics
     iteration_count: int # Current refinement iteration
     max_iterations: int # Maximum allowed iterations (default: 3)
     workflow_mode: str # 'generator_only', 'fact_critic', 'quality_critic', 'dual_critic'

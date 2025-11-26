@@ -536,12 +536,14 @@ evidence: "使用如 KNN（K-Nearest Neighbors）等算法，根據相似記錄�
                 if isinstance(q_result, Exception):
                     logger.error(f"Error evaluating question {q.get('question_number', i+1)}: {q_result}")
                     results["per_question"].append({
+                        "question_type": q.get("question_type", "unknown"),
                         "question_number": q.get("question_number", i + 1),
                         "error": str(q_result),
                         "evaluations": []
                     })
                 else:
                     results["per_question"].append({
+                        "question_type": q.get("question_type", "unknown"),
                         "question_number": q.get("question_number", i + 1),
                         "evaluations": q_result.get("evaluations", [])
                     })
