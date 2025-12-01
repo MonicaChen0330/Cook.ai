@@ -1,44 +1,66 @@
 import os
 import json
 from typing import List, Dict, Any, Tuple, Optional
-from pydantic import BaseModel, Field # Import BaseModel and Field
+from pydantic import BaseModel, Field
 
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.app.agents.rag_agent import rag_agent
-from backend.app.utils.db_logger import log_task
-from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import MODEL_PRICING, get_llm, _prepare_multimodal_content # Reusing helpers
+from backend.app.utils import db_logger
+from backend.app.utils.db_logger import log_task, log_task_sources
+from backend.app.agents.teacher_agent.skills.exam_generator.exam_nodes import MODEL_PRICING, get_llm, _prepare_multimodal_content
 
 from .state import SummarizationState
 
 # --- Pydantic Models for Structured Summary Output ---
 class SummarySection(BaseModel):
-    title: str = Field(..., description="The title of the summary section.")
+    section_title: str = Field(..., description="The title of the summary section.")
     content_list: List[str] = Field(..., description="A list of key points or sentences for this section.")
 
 class SummaryReport(BaseModel):
-    main_title: str = Field(..., description="The main title of the summary report.")
+    title: str = Field(..., description="The main title of the summary report.")
     sections: List[SummarySection] = Field(..., description="A list of sections, each with a title and key points.")
 
 # --- Node Functions ---
 
+@log_task(agent_name="retriever", task_description="Retrieve relevant document chunks for summarization.", input_extractor=lambda state: {"query": state.get("query"), "unique_content_id": state.get("unique_content_id")})
+def retrieve_chunks_node(state: SummarizationState) -> dict:
+    """
+    Retrieves context using RAGAgent and populates the state.
+    """
+    try:
+        rag_results = rag_agent.search(user_prompt=state["query"], unique_content_id=state["unique_content_id"])
+        # The decorator has already created the task and injected its ID into the state
+        log_task_sources(state["current_task_id"], rag_results["text_chunks"])
+
+        return {
+            "retrieved_page_content": rag_results["page_content"],
+            "parent_task_id": state["current_task_id"] # Set self as parent for the next node
+        }
+    except Exception as e:
+        return {"error": f"Failed to retrieve context: {str(e)}"}
+
 @log_task(
     agent_name="summarizer",
     task_description="Summarize provided course material.",
-    input_extractor=lambda state: {"query": state.get("query"), "unique_content_id": state.get("unique_content_id")}
+    input_extractor=lambda state: {
+        "query": state.get("query"),
+        "unique_content_id": state.get("unique_content_id"),
+        "retrieved_pages": len(state.get("retrieved_page_content", []))
+    }
 )
 def summarize_node(state: SummarizationState) -> dict:
     """
-    Retrieves content and generates a structured summary using an LLM with Tool Calling.
+    Generates a structured summary based on content already in the state,
+    and saves it to the database.
     """
     try:
-        # 1. Retrieve content using RAGAgent
-        rag_results = rag_agent.search(state["query"], state["unique_content_id"])
-        retrieved_page_content = rag_results["page_content"]
+        # 1. Get retrieved content from state
+        retrieved_page_content = state.get("retrieved_page_content")
 
         if not retrieved_page_content:
-            raise ValueError("No content found for summarization.")
+            raise ValueError("No content found in state for summarization.")
 
         combined_text, image_data_urls = _prepare_multimodal_content(retrieved_page_content)
 
@@ -97,9 +119,17 @@ def summarize_node(state: SummarizationState) -> dict:
         pricing = MODEL_PRICING.get(model_name, {"input": 0, "output": 0})
         estimated_cost = ((prompt_tokens / 1_000_000) * pricing["input"]) + ((completion_tokens / 1_000_000) * pricing["output"])
 
-        # 5. Return results for decorator to log
+        # 5. Return the summary report for the parent graph to handle.
+        # The @log_task decorator will capture this return value as the node's output.
+        summary_report_dict = summary_report.model_dump()
+
+        final_generated_content = {
+            "type": "summary",
+            **summary_report_dict
+        }
+        
         return {
-            "final_result": summary_report.model_dump(), # Return the structured summary as a dictionary
+            "final_generated_content": final_generated_content,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "estimated_cost_usd": estimated_cost
@@ -107,4 +137,7 @@ def summarize_node(state: SummarizationState) -> dict:
 
     except Exception as e:
         error_message = f"Failed to generate structured summary: {str(e)}"
-        return {"error": error_message}
+        return {
+            "error": error_message,
+            "final_generated_content": None
+        }

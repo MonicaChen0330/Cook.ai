@@ -4,11 +4,12 @@ Utility functions for logging orchestration and agent task data to the database.
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
-from sqlalchemy import create_engine, MetaData, Table, insert, update, select, func, text
+from sqlalchemy import create_engine, MetaData, Table, insert, update, select, func, text, Column, Integer, String
 from sqlalchemy.orm import sessionmaker
 import os
 from dotenv import load_dotenv
 import json
+import logging
 
 # --- Timezone and Database Setup ---
 TAIPEI_TZ = timezone(timedelta(hours=8))
@@ -20,26 +21,50 @@ if not DATABASE_URL:
 engine = create_engine(DATABASE_URL)
 metadata = MetaData()
 
+logger = logging.getLogger(__name__)
+
 # --- Table Reflection ---
 # Reflect existing tables to avoid re-declaring them
 try:
+    metadata.reflect(bind=engine) # Reflect all tables
     orchestration_jobs = Table('orchestration_jobs', metadata, autoload_with=engine)
     agent_tasks = Table('agent_tasks', metadata, autoload_with=engine)
     generated_contents = Table('generated_contents', metadata, autoload_with=engine)
     agent_task_sources = Table('agent_task_sources', metadata, autoload_with=engine)
 except Exception as e:
-    print(f"Error reflecting database tables: {e}")
+    logger.error(f"Error reflecting database tables: {e}")
     # Define tables with key columns as a fallback if reflection fails
+    # These definitions are minimal and might need more columns for full functionality
     orchestration_jobs = Table('orchestration_jobs', metadata,
         Column('id', Integer, primary_key=True),
+        Column('status', String),
+        Column('final_output_id', Integer),
+        Column('total_iterations', Integer),
+        Column('total_prompt_tokens', Integer),
+        Column('total_completion_tokens', Integer),
+        Column('total_latency_ms', Integer),
+        Column('estimated_carbon_g', Integer),
+        Column('updated_at', datetime),
         # Add other essential columns if needed for the script to be parsable
     )
     agent_tasks = Table('agent_tasks', metadata,
         Column('id', Integer, primary_key=True),
+        Column('job_id', Integer),
+        Column('status', String),
+        Column('prompt_tokens', Integer),
+        Column('completion_tokens', Integer),
+        Column('duration_ms', Integer),
+        Column('estimated_cost_usd', Integer),
+        Column('iteration_number', Integer),
+        Column('output', String), # Assuming JSON string for output
+        Column('error_message', String),
+        Column('completed_at', datetime),
         # ...
     )
     generated_contents = Table('generated_contents', metadata,
         Column('id', Integer, primary_key=True),
+        Column('content', String), # Assuming JSON string for content
+        Column('title', String),
     )
     agent_task_sources = Table('agent_task_sources', metadata,
         Column('task_id', Integer, primary_key=True),
@@ -56,6 +81,8 @@ def log_task(agent_name: str, task_description: str, input_extractor: Optional[c
     A decorator that wraps a LangGraph node function to automatically handle
     database logging for task creation, completion, and failure.
     
+    Supports both sync and async functions.
+    
     Args:
         agent_name (str): The name of the agent/node.
         task_description (str): A brief description of the task performed by the node.
@@ -65,90 +92,163 @@ def log_task(agent_name: str, task_description: str, input_extractor: Optional[c
                                               defaults to {"user_query": state.get("user_query")}.
     """
     def decorator(func):
-        @functools.wraps(func)
-        def wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
-            # Determine task_input based on input_extractor or default
-            extracted_task_input = None
-            if input_extractor:
-                try:
-                    extracted_task_input = input_extractor(state)
-                except Exception as e:
-                    print(f"[DB Logger] WARNING: Failed to extract task input for '{agent_name}': {e}")
-                    # Fallback to default if extractor fails
-                    extracted_task_input = {"user_query": state.get("user_query")}
-            else:
-                extracted_task_input = {"user_query": state.get("user_query")}
-
-            task_id = create_task(
-                job_id=state['job_id'],
-                agent_name=agent_name,
-                task_description=task_description,
-                task_input=extracted_task_input,
-                parent_task_id=state.get("parent_task_id")
-            )
-            
-            if task_id is None:
-                # If task creation fails, we can't proceed.
-                error_message = f"Failed to create database task for agent '{agent_name}'."
-                print(f"[DB Logger] ERROR: {error_message}")
-                return {"error": error_message}
-
-            start_time = time.perf_counter()
-            
-            try:
-                # Inject the current task_id into the state for the node to use
-                state_for_node = state.copy()
-                state_for_node['current_task_id'] = task_id
-                
-                # Execute the original node function
-                result = func(state_for_node)
-                
-                duration_ms = int((time.perf_counter() - start_time) * 1000)
-                
-                # Extract token and cost info from the result, if present
-                prompt_tokens = result.pop("prompt_tokens", None)
-                completion_tokens = result.pop("completion_tokens", None)
-                estimated_cost_usd = result.pop("estimated_cost_usd", None)
-
-                # Check if the node itself returned an error
-                if result.get("error"):
-                    update_task(
-                        task_id, 'failed', 
-                        error_message=result["error"], 
-                        duration_ms=duration_ms
-                    )
+        # Check if function is async
+        import asyncio
+        import inspect
+        is_async = asyncio.iscoroutinefunction(func)
+        
+        if is_async:
+            # Async wrapper
+            @functools.wraps(func)
+            async def async_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+                # Determine task_input based on input_extractor or default
+                extracted_task_input = None
+                if input_extractor:
+                    try:
+                        extracted_task_input = input_extractor(state)
+                    except Exception as e:
+                        logger.warning(f"Failed to extract task input for '{agent_name}': {e}")
+                        extracted_task_input = {"user_query": state.get("user_query")}
                 else:
-                    # The output to be logged is the rest of the dictionary returned by the node
-                    update_task(
-                        task_id, 'completed', 
-                        output=result, 
-                        duration_ms=duration_ms,
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        estimated_cost_usd=estimated_cost_usd
-                    )
+                    extracted_task_input = {"user_query": state.get("user_query")}
+
+                task_id = create_task(
+                    job_id=state['job_id'],
+                    agent_name=agent_name,
+                    task_description=task_description,
+                    task_input=extracted_task_input,
+                    parent_task_id=state.get("parent_task_id"),
+                    iteration_number=state.get("iteration_count", 1)
+                )
                 
-                # The decorator should pass through the original result, but merge it with the main state
-                # to ensure any updates from the node are preserved.
-                final_result = state.copy()
-                final_result.update(result)
+                if task_id is None:
+                    error_message = f"Failed to create database task for agent '{agent_name}'."
+                    logger.error(error_message)
+                    return {"error": error_message}
 
-                # Pass the ID of the task that just ran to the next steps in the graph.
-                # This is used by the aggregator to know which task to associate the content with,
-                # and by the next sibling node to know its parent.
-                if "error" not in final_result:
-                    final_result["parent_task_id"] = task_id
-                    final_result["current_task_id"] = task_id
+                start_time = time.perf_counter()
+                
+                try:
+                    state_for_node = state.copy()
+                    state_for_node['current_task_id'] = task_id
                     
-                return final_result
+                    # Execute the async node function
+                    result = await func(state_for_node)
+                    
+                    duration_ms = int((time.perf_counter() - start_time) * 1000)
+                    
+                    prompt_tokens = result.pop("prompt_tokens", None)
+                    completion_tokens = result.pop("completion_tokens", None)
+                    estimated_cost_usd = result.pop("estimated_cost_usd", None)
 
-            except Exception as e:
-                error_message = str(e)
-                duration_ms = int((time.perf_counter() - start_time) * 1000)
-                update_task(task_id, 'failed', error_message=error_message, duration_ms=duration_ms)
-                # Ensure the error is propagated in the state
-                return {"error": error_message}
-        return wrapper
+                    if result.get("error"):
+                        update_task(
+                            task_id, 'failed', 
+                            error_message=result["error"], 
+                            duration_ms=duration_ms
+                        )
+                    else:
+                        update_task(
+                            task_id, 'completed', 
+                            output=result, 
+                            duration_ms=duration_ms,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            estimated_cost_usd=estimated_cost_usd
+                        )
+                    
+                    final_result = state.copy()
+                    final_result.update(result)
+
+                    if "error" not in final_result:
+                        final_result["parent_task_id"] = task_id
+                        final_result["current_task_id"] = task_id
+                        
+                    return final_result
+
+                except Exception as e:
+                    error_message = str(e)
+                    duration_ms = int((time.perf_counter() - start_time) * 1000)
+                    update_task(task_id, 'failed', error_message=error_message, duration_ms=duration_ms)
+                    return {"error": error_message}
+            
+            return async_wrapper
+        
+        else:
+            # Sync wrapper (original implementation)
+            @functools.wraps(func)
+            def sync_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+                extracted_task_input = None
+                if input_extractor:
+                    try:
+                        extracted_task_input = input_extractor(state)
+                    except Exception as e:
+                        logger.warning(f"Failed to extract task input for '{agent_name}': {e}")
+                        extracted_task_input = {"user_query": state.get("user_query")}
+                else:
+                    extracted_task_input = {"user_query": state.get("user_query")}
+
+                task_id = create_task(
+                    job_id=state['job_id'],
+                    agent_name=agent_name,
+                    task_description=task_description,
+                    task_input=extracted_task_input,
+                    parent_task_id=state.get("parent_task_id"),
+                    iteration_number=state.get("iteration_count", 1)
+                )
+                
+                if task_id is None:
+                    error_message = f"Failed to create database task for agent '{agent_name}'."
+                    logger.error(error_message)
+                    return {"error": error_message}
+
+                start_time = time.perf_counter()
+                
+                try:
+                    state_for_node = state.copy()
+                    state_for_node['current_task_id'] = task_id
+                    
+                    result = func(state_for_node)
+                    
+                    duration_ms = int((time.perf_counter() - start_time) * 1000)
+                    
+                    prompt_tokens = result.pop("prompt_tokens", None)
+                    completion_tokens = result.pop("completion_tokens", None)
+                    estimated_cost_usd = result.pop("estimated_cost_usd", None)
+
+                    if result.get("error"):
+                        update_task(
+                            task_id, 'failed', 
+                            error_message=result["error"], 
+                            duration_ms=duration_ms
+                        )
+                    else:
+                        update_task(
+                            task_id, 'completed', 
+                            output=result, 
+                            duration_ms=duration_ms,
+                            prompt_tokens=prompt_tokens,
+                            completion_tokens=completion_tokens,
+                            estimated_cost_usd=estimated_cost_usd
+                        )
+                    
+                    final_result = state.copy()
+                    final_result.update(result)
+
+                    if "error" not in final_result:
+                        final_result["parent_task_id"] = task_id
+                        final_result["current_task_id"] = task_id
+                        
+                    return final_result
+
+                except Exception as e:
+                    error_message = str(e)
+                    duration_ms = int((time.perf_counter() - start_time) * 1000)
+                    update_task(task_id, 'failed', error_message=error_message, duration_ms=duration_ms)
+                    return {"error": error_message}
+            
+            return sync_wrapper
+    
     return decorator
 
 # --- Job-level Logging ---
@@ -169,10 +269,10 @@ def create_job(user_id: int, input_prompt: str, workflow_type: str, experiment_c
             result = conn.execute(stmt)
             job_id = result.scalar_one()
             conn.commit()
-            print(f"[DB Logger] Created job {job_id} for workflow '{workflow_type}'.")
+            logger.info(f"Created job {job_id} for workflow '{workflow_type}'.")
             return job_id
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to create job. Reason: {e}")
+        logger.error(f"Failed to create job. Reason: {e}")
         return None
 
 def update_job_status(job_id: int, status: str, error_message: Optional[str] = None):
@@ -186,9 +286,9 @@ def update_job_status(job_id: int, status: str, error_message: Optional[str] = N
             )
             conn.execute(stmt)
             conn.commit()
-            print(f"[DB Logger] Updated job {job_id} status to '{status}'.")
+            logger.info(f"Updated job {job_id} status to '{status}'.")
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to update job {job_id}. Reason: {e}")
+        logger.error(f"Failed to update job {job_id}. Reason: {e}")
 
 def update_job_final_output(job_id: int, final_output_id: int):
     """Updates the final_output_id of a job."""
@@ -200,13 +300,33 @@ def update_job_final_output(job_id: int, final_output_id: int):
             )
             conn.execute(stmt)
             conn.commit()
-            print(f"[DB Logger] Updated job {job_id} with final_output_id: {final_output_id}.")
+            logger.info(f"Updated job {job_id} with final_output_id: {final_output_id}.")
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to update job {job_id} final_output_id. Reason: {e}")
+        logger.error(f"Failed to update job {job_id} final_output_id. Reason: {e}")
+
+def get_job_status(job_id: int) -> Optional[str]:
+    """Retrieves the current status of a job."""
+    try:
+        with engine.connect() as conn:
+            stmt = select(orchestration_jobs.c.status).where(orchestration_jobs.c.id == job_id)
+            status = conn.execute(stmt).scalar_one_or_none()
+            return status
+    except Exception as e:
+        logger.error(f"Failed to get status for job {job_id}. Reason: {e}")
+        return None
 
 # --- Task-level Logging ---
 
-def create_task(job_id: int, agent_name: str, task_description: str, task_input: Optional[Dict] = None, model_name: Optional[str] = None, parent_task_id: Optional[int] = None, model_parameters: Optional[Dict] = None) -> Optional[int]:
+def create_task(
+    job_id: int, 
+    agent_name: str, 
+    task_description: str, 
+    task_input: Optional[Dict] = None, 
+    model_name: Optional[str] = None, 
+    parent_task_id: Optional[int] = None, 
+    model_parameters: Optional[Dict] = None,
+    iteration_number: int = 1
+) -> Optional[int]:
     """Creates a new record in the agent_tasks table and returns its ID and start time."""
     try:
         with engine.connect() as conn:
@@ -219,15 +339,16 @@ def create_task(job_id: int, agent_name: str, task_description: str, task_input:
                 model_name=model_name,
                 parent_task_id=parent_task_id,
                 model_parameters=model_parameters,
+                iteration_number=iteration_number,
                 created_at=datetime.now(TAIPEI_TZ)
             ).returning(agent_tasks.c.id)
             result = conn.execute(stmt)
             task_id = result.scalar_one()
             conn.commit()
-            print(f"[DB Logger] Created task {task_id} for agent '{agent_name}'.")
+            logger.info(f"Created task {task_id} for agent '{agent_name}' (iteration {iteration_number}, parent={parent_task_id}).")
             return task_id
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to create task for agent '{agent_name}'. Reason: {e}")
+        logger.error(f"Failed to create task for agent '{agent_name}'. Reason: {e}")
         return None
 
 def update_task(
@@ -255,7 +376,7 @@ def update_task(
                 else:
                     processed_output = {"value": str(output)} # Catch all other types
 
-            values_to_update = {
+            values = { # Renamed from values_to_update to values as per snippet
                 "status": status,
                 "output": processed_output, # Use the processed output
                 "error_message": error_message,
@@ -266,14 +387,14 @@ def update_task(
                 "estimated_cost_usd": estimated_cost_usd
             }
             # Filter out None values so they don't overwrite existing data in the DB
-            values_to_update = {k: v for k, v in values_to_update.items() if v is not None}
+            values = {k: v for k, v in values.items() if v is not None}
 
-            stmt = update(agent_tasks).where(agent_tasks.c.id == task_id).values(**values_to_update)
+            stmt = update(agent_tasks).where(agent_tasks.c.id == task_id).values(**values)
             conn.execute(stmt)
             conn.commit()
-            print(f"[DB Logger] Updated task {task_id} to status '{status}'.")
+            logger.info(f"Updated task {task_id} to status '{status}'.")
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to update task {task_id}. Reason: {e}")
+        logger.error(f"Failed to update task {task_id}. Reason: {e}")
 
 
 # --- Content and Source Logging ---
@@ -301,10 +422,10 @@ def log_task_sources(task_id: int, source_chunks: Optional[List[Dict]] = None):
             with conn.begin():
                 conn.execute(insert(agent_task_sources), records_to_insert)
             
-            print(f"[DB Logger] Logged {len(records_to_insert)} sources for task {task_id}.")
+            logger.info(f"Logged {len(records_to_insert)} sources for task {task_id}.")
 
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to log sources for task {task_id}. Reason: {e}")
+        logger.error(f"Failed to log sources for task {task_id}. Reason: {e}")
 
 
 def save_generated_content(task_id: int, content_type: str, title: str, content: str) -> Optional[int]:
@@ -338,11 +459,11 @@ def save_generated_content(task_id: int, content_type: str, title: str, content:
             content_id = result.scalar_one()
             conn.commit()
             
-            print(f"[DB Logger] Saved generated content for task {task_id}. New content ID: {content_id}.")
+            logger.info(f"Saved generated content for task {task_id}. New content ID: {content_id}.")
             return content_id
             
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to save generated content for task {task_id}. Reason: {e}")
+        logger.error(f"Failed to save generated content for task {task_id}. Reason: {e}")
         return None
 
 def get_generated_content_by_id(content_id: int) -> Optional[Dict]:
@@ -355,7 +476,7 @@ def get_generated_content_by_id(content_id: int) -> Optional[Dict]:
                 return {"title": result.title, "data": result.content}
             return None
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to retrieve generated content {content_id}. Reason: {e}")
+        logger.error(f"Failed to retrieve generated content {content_id}. Reason: {e}")
         return None
 
 def get_job_final_output_id(job_id: int) -> Optional[int]:
@@ -366,5 +487,68 @@ def get_job_final_output_id(job_id: int) -> Optional[int]:
             result = conn.execute(stmt).scalar_one_or_none()
             return result
     except Exception as e:
-        print(f"[DB Logger] ERROR: Failed to retrieve final_output_id for job {job_id}. Reason: {e}")
+        logger.error(f"Failed to retrieve final_output_id for job {job_id}. Reason: {e}")
         return None
+
+def get_job_cumulative_metrics(job_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Retrieves cumulative metrics from all agent_tasks for a given job.
+    
+    Returns a dictionary with:
+    - total_iterations: Count of distinct iteration_number values
+    - total_prompt_tokens: Sum of all prompt_tokens
+    - total_completion_tokens: Sum of all completion_tokens
+    - total_latency_ms: Sum of all duration_ms
+    - estimated_carbon_g: Estimated carbon emissions (placeholder)
+    """
+    try:
+        with engine.connect() as conn:
+            # Query to aggregate metrics
+            stmt = select(
+                func.count(func.distinct(agent_tasks.c.iteration_number)).label('total_iterations'),
+                func.coalesce(func.sum(agent_tasks.c.prompt_tokens), 0).label('total_prompt_tokens'),
+                func.coalesce(func.sum(agent_tasks.c.completion_tokens), 0).label('total_completion_tokens'),
+                func.coalesce(func.sum(agent_tasks.c.duration_ms), 0).label('total_latency_ms')
+            ).where(agent_tasks.c.job_id == job_id)
+            
+            result = conn.execute(stmt).fetchone()
+            
+            if result:
+                return {
+                    "total_iterations": result.total_iterations or 0,
+                    "total_prompt_tokens": int(result.total_prompt_tokens),
+                    "total_completion_tokens": int(result.total_completion_tokens),
+                    "total_latency_ms": int(result.total_latency_ms),
+                    "estimated_carbon_g": 0  # Placeholder for future carbon calculation
+                }
+            return None
+    except Exception as e:
+        logger.error(f"Failed to get cumulative metrics for job {job_id}. Reason: {e}")
+        return None
+
+def update_job_iterations_and_cost(job_id: int):
+    """
+    Updates the orchestration_jobs table with cumulative metrics from all related agent_tasks.
+    This should be called when a job completes.
+    """
+    try:
+        metrics = get_job_cumulative_metrics(job_id)
+        if not metrics:
+            logger.warning(f"No metrics found for job {job_id}.")
+            return
+        
+        with engine.connect() as conn:
+            stmt = update(orchestration_jobs).where(orchestration_jobs.c.id == job_id).values(
+                total_iterations=metrics["total_iterations"],
+                total_prompt_tokens=metrics["total_prompt_tokens"],
+                total_completion_tokens=metrics["total_completion_tokens"],
+                total_latency_ms=metrics["total_latency_ms"],
+                estimated_carbon_g=metrics["estimated_carbon_g"],
+                updated_at=datetime.now(TAIPEI_TZ)
+            )
+            conn.execute(stmt)
+            conn.commit()
+            logger.info(f"Updated job {job_id} with cumulative metrics: {metrics['total_iterations']} iterations.")
+    except Exception as e:
+        logger.error(f"Failed to update job {job_id} iterations and cost. Reason: {e}")
+

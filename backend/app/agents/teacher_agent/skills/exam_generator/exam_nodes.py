@@ -22,6 +22,7 @@ class Task(BaseModel):
 
 class Plan(BaseModel):
     """A structured plan consisting of a list of generation tasks."""
+    main_title: str = Field(..., description="A concise, professional title (in Traditional Chinese) that clearly describes the topic and focus of the generated exam questions based on the user's query.")
     tasks: List[Task] = Field(..., description="A list of generation tasks to perform based on the user's query.")
 
 # --- Pydantic Models for Question Types ---
@@ -131,7 +132,7 @@ def _prepare_multimodal_content(retrieved_page_content: List[Dict[str, Any]]) ->
 def retrieve_chunks_node(state: ExamGenerationState) -> dict:
     """Retrieves context using RAGAgent and populates the state."""
     try:
-        rag_results = rag_agent.search(state["query"], state["unique_content_id"])
+        rag_results = rag_agent.search(user_prompt=state["query"], unique_content_id=state["unique_content_id"])
         # The decorator has already created the task and injected its ID into the state
         log_task_sources(state["current_task_id"], rag_results["text_chunks"])
 
@@ -149,15 +150,67 @@ def retrieve_chunks_node(state: ExamGenerationState) -> dict:
 @log_task(agent_name="plan_generation_tasks", task_description="Analyze user query to create a generation plan.", input_extractor=lambda state: {"query": state.get("query")})
 def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
     """Analyzes the user query to create a structured generation plan using an LLM."""
-    # This node is not supposed to run if a plan already exists.
-    if state.get("generation_plan") or state.get("final_generated_content"):
+    # --- Refinement Logic ---
+    critic_feedback = state.get("critic_feedback", [])
+    if critic_feedback:
+        latest_feedback = critic_feedback[-1]
+        if latest_feedback.get("overall_status") == "fail":
+            # Generate a Refinement Plan
+            # We need to identify which tasks need to be re-done or refined.
+            # For simplicity, we will re-generate the questions that failed.
+            
+            feedback_items = latest_feedback.get("feedback_items", []) # Should be "final_feedback" from CriticState
+            # Note: In TeacherAgentState, we store the list of feedback dicts.
+            # The structure depends on how we map CriticState to TeacherAgentState.
+            # Let's assume we store the whole CriticState output or similar.
+            
+            # Actually, let's look at how we will pass data.
+            # We need to parse the feedback to create tasks.
+            
+            refinement_tasks = []
+            for item in feedback_items:
+                # item: { "question_index": int, "type": "fact"|"quality", "feedback": [...] }
+                # We need to map index back to the specific question type/task.
+                # This is tricky if we don't track lineage.
+                # For now, let's create a generic "refine_content" task or re-generate all?
+                
+                # Simpler approach for V1:
+                # If feedback exists, we create a "refine_exam" task that takes the *entire* previous content + feedback
+                # and asks the LLM to fix it.
+                pass
+            
+            # Let's use a specific Refinement Task
+            # Note: The Task BaseModel does not support 'id', 'description', 'dependencies', 'status', 'params'.
+            # For now, we'll create a dictionary that represents this conceptual task.
+            # This will require a new node to handle 'refine_exam' type tasks.
+            refinement_plan_task = {
+                "type": "refine_exam",
+                "count": 1, # This task represents a single refinement operation
+                "topic": "Refine exam questions based on critic feedback",
+                "params": {
+                    "feedback": latest_feedback,
+                    "previous_content": state.get("final_generated_content", [])
+                } # Pass the full feedback and content for the refinement agent
+            }
+            
+            return {
+                "generation_plan": [refinement_plan_task],
+                "current_task": None,
+                "final_generated_content": [] # Clear previous content to allow overwrite/append
+            }
+
+    # If plan exists and no feedback (or feedback passed), skip
+    if state.get("generation_plan") and not critic_feedback:
+        return {}
+    
+    if state.get("final_generated_content") and not critic_feedback:
         return {}
 
     try:
         llm = get_llm()
-        prompt = f"Analyze the user's query to create a step-by-step generation plan.\n\n**User Query:** \"{state['query']}\"\n\nYou must respond by calling the `Plan` tool."
+        prompt = f"Analyze the user's query to create a structured generation plan and a descriptive main title. The title should summarize the entire task in Traditional Chinese.\n\n**User Query:** \"{state['query']}\"\n\nYou must respond by calling the `Plan` tool."
         planner_llm = llm.bind_tools(tools=[Plan], tool_choice="Plan")
-        messages = [SystemMessage(content="You are a helpful assistant that creates a structured generation plan."), HumanMessage(content=prompt)]
+        messages = [SystemMessage(content="You are a helpful assistant that creates a structured generation plan and a descriptive title."), HumanMessage(content=prompt)]
         
         response = planner_llm.invoke(messages)
         
@@ -165,6 +218,8 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
             raise ValueError("The model did not call the required 'Plan' tool.")
             
         plan = Plan(**response.tool_calls[0]['args'])
+
+        main_title = plan.main_title
         generation_plan = [task.model_dump() for task in plan.tasks]
         
         # --- Extract tokens and cost for the decorator ---
@@ -177,6 +232,7 @@ def plan_generation_tasks_node(state: ExamGenerationState) -> dict:
 
         return {
             "generation_plan": generation_plan,
+            "main_title": main_title,
             "parent_task_id": state["current_task_id"], # Pass self as parent for next nodes
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
@@ -202,6 +258,8 @@ def should_continue_router(state: ExamGenerationState) -> str:
     current_task = state.get("current_task")
     if current_task:
         task_type = current_task.get("type")
+        if task_type == "refine_exam":
+            return "refine_exam"
         return f"generate_{task_type}" if task_type in ["multiple_choice", "short_answer", "true_false"] else "end" # Return "end" for aggregation
     return "end" # Go to aggregation if no more tasks
 
@@ -292,6 +350,7 @@ def _generic_generate_question(state: ExamGenerationState, task_type_name: str) 
 
         return {
             "final_generated_content": new_final_generated_content,
+            "main_title": state.get("main_title"), # Preserve the title
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "estimated_cost_usd": estimated_cost
@@ -313,6 +372,97 @@ def generate_short_answer_node(state: ExamGenerationState) -> dict:
 def generate_true_false_node(state: ExamGenerationState) -> dict:
     return _generic_generate_question(state, "true_false")
 
+@log_task(agent_name="refine_exam", task_description="Refining exam questions based on feedback.", input_extractor=lambda state: {"feedback_count": len(state.get("critic_feedback", []))})
+def refine_exam_node(state: ExamGenerationState) -> dict:
+    """
+    Refines the generated exam questions based on critic feedback.
+    """
+    critic_feedback = state.get("critic_feedback", [])
+    if not critic_feedback:
+        return {"error": "No feedback found for refinement."}
+        
+    latest_feedback = critic_feedback[-1]
+    
+    # We need to access the previous content.
+    # In plan_generation_tasks_node, we cleared final_generated_content.
+    # BUT we need it for refinement.
+    # We should have preserved it or passed it in params.
+    # The task params has 'feedback'.
+    # Let's assume the state still has 'final_generated_content' because we are in a loop?
+    # No, plan_generation_tasks_node returned "final_generated_content": [] to clear it.
+    # This is a problem.
+    # The planner should NOT clear it if it's a refinement task, OR it should pass it in params.
+    # Let's assume for now we didn't clear it (I need to check plan_generation_tasks_node again).
+    # In Step 262, I added "final_generated_content": [] to the return dict.
+    # So it IS cleared.
+    
+    # I must fix plan_generation_tasks_node to NOT clear it if refining, 
+    # OR pass it to the task.
+    # Passing to task is safer.
+    
+    # But wait, I can't easily change plan_generation_tasks_node in this same tool call if I don't target it.
+    # Let's assume I will fix plan_generation_tasks_node in the next step or use a workaround.
+    # Workaround: The state passed to this node is the accumulated state.
+    # If planner returned [], then state['final_generated_content'] is [].
+    # So I MUST fix planner.
+    
+    # For now, let's implement the node assuming content is available in state or params.
+    # I'll check state.get("final_generated_content") or params.
+    
+    current_task = state.get("current_task", {})
+    params = current_task.get("params", {})
+    
+    # If content is empty, we are stuck.
+    # Let's try to recover from history?
+    # TeacherAgentState has 'final_generated_content'.
+    # But we are in ExamGenerationState.
+    # The TeacherAgent passes 'final_generated_content' down? No.
+    
+    # I will modify plan_generation_tasks_node to pass 'previous_content' in params.
+    
+    current_content = params.get("previous_content", state.get("final_generated_content", []))
+    
+    # Construct Prompt
+    feedback_str = json.dumps(latest_feedback, ensure_ascii=False, indent=2)
+    content_str = json.dumps(current_content, ensure_ascii=False, indent=2)
+    
+    system_prompt = (
+        "You are an expert educational content editor. "
+        "Your task is to refine exam questions based on specific feedback from a critic. "
+        "Ensure all output is in Traditional Chinese (繁體中文)."
+    )
+    
+    user_prompt = (
+        f"Here are the original questions:\n{content_str}\n\n"
+        f"Here is the feedback from the critic:\n{feedback_str}\n\n"
+        "Please rewrite the questions to address *all* the feedback points. "
+        "Return the FULL set of questions (including those that didn't need changes) in the same JSON format."
+    )
+    
+    llm = get_llm()
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_prompt)]
+    
+    try:
+        response = llm.invoke(messages)
+        content = response.content.strip()
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0].strip()
+            
+        refined_content = json.loads(content)
+        
+        # Ensure it's a list
+        if isinstance(refined_content, dict):
+             refined_content = [refined_content]
+             
+        return {
+            "final_generated_content": refined_content,
+            "current_task": None # Task done
+        }
+    except Exception as e:
+        return {"error": f"Refinement failed: {str(e)}"}
+
 def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
     """Handles any errors that occurred during the process."""
     # This error is now logged at the node where it occurred.
@@ -322,8 +472,7 @@ def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
 @log_task(agent_name="aggregate_exam_output", task_description="Aggregating all generated exam content into a final structured output.", input_extractor=lambda state: {"query": state.get("query"), "aggregated_item_count": len(state.get("final_generated_content", []))})
 def aggregate_final_output_node(state: ExamGenerationState) -> dict:
     """
-    Aggregates all generated content, saves it to the database, and updates the job's final_output_id.
-    This node's execution is logged by the @log_task decorator.
+    Aggregates all generated content and returns it in the state for the parent graph.
     """
     job_id = state['job_id']
     
@@ -335,9 +484,6 @@ def aggregate_final_output_node(state: ExamGenerationState) -> dict:
             else:
                 aggregated_output.append({"type": "unstructured_content", "content": content_item})
 
-        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
-        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
-
         if state.get("generation_errors"):
             aggregated_output.insert(0, {
                 "type": "generation_warnings",
@@ -345,130 +491,23 @@ def aggregate_final_output_node(state: ExamGenerationState) -> dict:
                 "errors": state["generation_errors"]
             })
         
-        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
-
-        # The decorator has already created the task for this node. We use its ID.
-        current_task_id = state["current_task_id"]
-        final_content_id = db_logger.save_generated_content(
-            current_task_id,
-            "final_exam_output",
-            generated_title,
-            final_json_output
-        )
-
-        if final_content_id:
-            db_logger.update_job_final_output(job_id, final_content_id)
-        else:
-            raise Exception("Failed to save final aggregated content.")
-
+        # Determine final job status and update it
         job_status = 'completed'
         if state.get("generation_errors"):
             job_status = 'partial_success' if len(aggregated_output) > 1 else 'failed'
         
         db_logger.update_job_status(job_id, job_status, error_message="Some generation tasks failed." if job_status == 'partial_success' else None)
 
-        # Return the final aggregated content for the decorator to log as this node's output
-        return {"final_generated_content": aggregated_output}
+        existing_title = state.get("main_title")
+
+        # Return the final aggregated content for the decorator to log and for the parent graph to use.
+        return {
+            "final_generated_content": aggregated_output,
+            "main_title": existing_title if existing_title else f"未命名測驗 ({datetime.now().strftime('%Y-%m-%d')})"
+        }
 
     except Exception as e:
         error_message = f"Error aggregating final output: {str(e)}"
         db_logger.update_job_status(job_id, 'failed', error_message=error_message)
         # Return the error for the decorator to log
         return {"error": error_message, "generation_errors": state.get("generation_errors", []) + [{"task": "aggregate_final_output", "error_message": str(e)}]}
-
-
-def handle_error_node(state: ExamGenerationState) -> ExamGenerationState:
-    """Handles any errors that occurred during the process."""
-    # This error is now logged at the node where it occurred.
-    # This node is primarily for graph control flow.
-    return state
-
-def aggregate_final_output_node(state: ExamGenerationState) -> ExamGenerationState:
-    """
-    Aggregates all generated content (which are now structured JSON objects) into a single
-    structured JSON object, saves it to the database, and updates the job's final_output_id.
-    Also generates a title for the aggregated content.
-    """
-    job_id = state['job_id']
-    duration_ms = 0 # Initialize duration_ms
-
-    task_id = db_logger.create_task(
-        job_id,
-        "aggregate_final_output",
-        "Aggregating all generated exam content into a final structured output.",
-        parent_task_id=state.get("parent_task_id"),
-        task_input={"query": state["query"], "aggregated_item_count": len(state["final_generated_content"])}
-    )
-    start_time = time.perf_counter()
-
-    aggregated_output = []
-    
-    try:
-        for content_item in state["final_generated_content"]:
-            # content_item is expected to be a dictionary like {"type": "multiple_choice", "questions": [...]}
-            if isinstance(content_item, dict) and "type" in content_item and "questions" in content_item:
-                aggregated_output.append(content_item)
-            else:
-                # Fallback for any unexpected format, though with tool calling, this should be rare
-                aggregated_output.append({
-                    "type": "unstructured_content",
-                    "content": content_item # Store as is if not structured
-                })
-
-        # Generate a title for the aggregated content
-        # Example: "Exam based on 'User Query' - [Date]"
-        query_snippet = state['query'][:50] + "..." if len(state['query']) > 50 else state['query']
-        generated_title = f"Exam: {query_snippet} ({datetime.now().strftime('%Y-%m-%d')})"
-
-        # Add generation errors to the aggregated output if any
-        if state["generation_errors"]:
-            aggregated_output.insert(0, { # Insert at the beginning for prominence
-                "type": "generation_warnings",
-                "message": "Some question types failed to generate. Please check the details below.",
-                "errors": state["generation_errors"]
-            })
-        
-        # Convert the aggregated output to a JSON string
-        final_json_output = json.dumps(aggregated_output, ensure_ascii=False, indent=2)
-
-        # Save the final aggregated content to the database
-        final_content_id = db_logger.save_generated_content(
-            task_id,
-            "final_exam_output",
-            generated_title,
-            final_json_output
-        )
-
-        if final_content_id:
-            db_logger.update_job_final_output(job_id, final_content_id)
-            # Update state with the actual aggregated output (parsed JSON object)
-            state["final_generated_content"] = aggregated_output
-        else:
-            raise Exception("Failed to save final aggregated content.")
-
-        # Determine final job status
-        job_status = 'completed'
-        if state["generation_errors"]:
-            if aggregated_output and len(aggregated_output) > 1: # More than just the warning message
-                job_status = 'partial_success'
-            else:
-                job_status = 'failed'
-        
-        duration_ms = int((time.perf_counter() - start_time) * 1000) # Define duration_ms here
-        db_logger.update_task(task_id, job_status, json.loads(final_json_output), duration_ms=duration_ms)
-
-    except Exception as e:
-        state["error"] = f"Error aggregating final output: {str(e)}"
-        state["generation_errors"].append({"task": "aggregate_final_output", "error_message": str(e)})
-        job_status = 'failed'
-        db_logger.update_task(task_id, job_status, error_message=str(e), duration_ms=duration_ms) # Use initialized duration_ms
-    
-    # Update the main job status based on the overall outcome
-    if job_status == 'failed':
-        db_logger.update_job_status(job_id, 'failed', error_message=state["error"])
-    elif job_status == 'partial_success':
-        db_logger.update_job_status(job_id, 'partial_success', error_message="Some generation tasks failed.")
-    else:
-        db_logger.update_job_status(job_id, 'completed')
-
-    return state

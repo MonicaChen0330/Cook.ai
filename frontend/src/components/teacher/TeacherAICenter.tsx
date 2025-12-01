@@ -10,7 +10,7 @@ export type Source = {
 };
 
 const TeacherAICenter: React.FC = () => {
-  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]); // Changed to store unique_content_id (number)
   const [sources, setSources] = useState<Source[]>([]);
   const [panelWidth, setPanelWidth] = useState(320);
   const isResizing = useRef(false);
@@ -18,7 +18,7 @@ const TeacherAICenter: React.FC = () => {
 
   const fetchSources = useCallback(async () => {
     try {
-      const response = await fetch('http://localhost:8000/api/materials?course_id=1');
+      const response = await fetch('http://140.115.54.162:8000/api/v1/materials?course_id=1');
       if (!response.ok) {
         throw new Error('Failed to fetch sources');
       }
@@ -36,12 +36,25 @@ const TeacherAICenter: React.FC = () => {
     fetchSources();
   }, []);
 
-  const handleSelectSource = (sourceId: string) => {
-    setSelectedSources(prev =>
-      prev.includes(sourceId)
-        ? prev.filter(id => id !== sourceId)
-        : [...prev, sourceId]
-    );
+  const handleSelectSource = (uniqueContentId: number) => { // Expect uniqueContentId as number
+    console.log("handleSelectSource received uniqueContentId:", uniqueContentId);
+    console.log("Current sources array:", sources);
+
+    const selectedSource = sources.find(s => s.unique_content_id === uniqueContentId); // Find by unique_content_id
+    console.log("Result of sources.find for uniqueContentId:", selectedSource);
+
+    if (!selectedSource) {
+        console.error("Error: selectedSource is undefined for uniqueContentId:", uniqueContentId);
+        return;
+    }
+
+    setSelectedSources(prev => {
+      if (prev.includes(selectedSource.unique_content_id)) {
+        return prev.filter(id => id !== selectedSource.unique_content_id);
+      } else {
+        return [...prev, selectedSource.unique_content_id];
+      }
+    });
   };
 
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -89,7 +102,7 @@ const TeacherAICenter: React.FC = () => {
 
       <main className="flex-1 h-full min-w-0">
         <ChatInterface 
-          selectedSourceIds={selectedSources} 
+          selectedUniqueContentIds={selectedSources.map(id => parseInt(id, 10))}
         />
       </main>
     </div>
