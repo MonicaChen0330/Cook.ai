@@ -19,12 +19,18 @@ function Student() {
   const [breadcrumbPaths, setBreadcrumbPaths] = useState<BreadcrumbPath[] | null>(null);
 
   return (
-    <div className="page-wrapper">
-      <Header paths={breadcrumbPaths} />
-      <main className="page-content">
+    <div className="flex flex-col h-screen w-screen overflow-hidden bg-white">
+
+      <div className="flex-shrink-0">
+        <Header paths={breadcrumbPaths} />
+      </div>
+      <main className="flex-1 overflow-hidden relative">
         <Outlet context={{ setBreadcrumbPaths, breadcrumbPaths } as OutletContext} />
       </main>
-      <Footer />
+      <div className="flex-shrink-0">
+        <Footer />
+      </div>
+
     </div>
   );
 }

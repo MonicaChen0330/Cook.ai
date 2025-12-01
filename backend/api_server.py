@@ -18,6 +18,8 @@ from backend.app.utils import db_logger
 from backend.app.utils.db_logger import engine, metadata
 from sqlalchemy import Table, select, update
 
+#
+from backend.app.routers import debugging_problems
 # --- FastAPI App and Routers ---
 
 # Create the FastAPI app
@@ -30,7 +32,6 @@ app = FastAPI(
 agent_router = APIRouter(prefix="/api/v1", tags=["Agent Interaction"])
 data_management_router = APIRouter(prefix="/api/v1", tags=["Data Management"])
 testing_router = APIRouter(prefix="/api/v1/testing", tags=["Development & Testing"])
-
 
 # --- Add CORS Middleware ---
 origins = [
@@ -610,6 +611,7 @@ def health_check():
 app.include_router(agent_router)
 app.include_router(data_management_router)
 app.include_router(testing_router)
+app.include_router(debugging_problems.router)
 
 # To run this server:
 # 1. Make sure you are in the root directory of the project (Cook.ai).
