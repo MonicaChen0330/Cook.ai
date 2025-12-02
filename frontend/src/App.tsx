@@ -11,7 +11,7 @@ import TeacherCourse from './pages/teacher/TeacherCourse';
 import StudentOverview from './pages/student/StudentOverview';
 import StudentCourseLayout from './components/student/StudentCourseLayout';
 import StudentCourse from './pages/student/StudentCourse';
-import StudentCoding from './pages/student/StudentCoding';
+import StudentCoding from './pages/student/debugging/StudentCoding';
 
 function App() {
   return (
