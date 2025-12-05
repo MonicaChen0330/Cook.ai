@@ -1,8 +1,12 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { FaChalkboardTeacher, FaUserGraduate } from 'react-icons/fa';
 import Footer from '../components/common/Footer.tsx';
+import RegisterModal from '../components/auth/RegisterModal';
 
 function Home() {
+  const [isRegisterModalOpen, setIsRegisterModalOpen] = useState(false);
+
   return (
     <div className="flex flex-col min-h-screen">
       <main className="flex-grow flex flex-col justify-center items-center">
@@ -22,6 +26,21 @@ function Home() {
         <p className="text-lg text-neutral-text-secondary mt-2 mb-12">
           您的智慧教學夥伴，讓學習與教學更有效率
         </p>
+
+        {/* 註冊按鈕 */}
+        <button
+          onClick={() => setIsRegisterModalOpen(true)}
+          className="
+            mb-12 px-8 py-3 
+            bg-gradient-to-r from-theme-button-gradient-from to-theme-button-gradient-to
+            text-white font-medium rounded-lg
+            shadow-default
+            transition-all duration-300 ease-in-out
+            hover:shadow-lg hover:-translate-y-0.5
+          "
+        >
+          立即註冊
+        </button>
         
         <div className="flex gap-8">
           
@@ -74,6 +93,12 @@ function Home() {
         </div>
       </main>
       <Footer />
+
+      {/* 註冊 Modal */}
+      <RegisterModal
+        isOpen={isRegisterModalOpen}
+        onClose={() => setIsRegisterModalOpen(false)}
+      />
     </div>
   );
 }

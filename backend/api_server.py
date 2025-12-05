@@ -20,6 +20,7 @@ from sqlalchemy import Table, select, update
 
 #
 from backend.app.routers import debugging_problems
+from backend.app.routers import auth_router
 # --- FastAPI App and Routers ---
 
 # Create the FastAPI app
@@ -608,10 +609,14 @@ def health_check():
     return {"status": "ok"}
 
 # Register the routers with the main FastAPI app
-app.include_router(agent_router)
+
 app.include_router(data_management_router)
 app.include_router(testing_router)
 app.include_router(debugging_problems.router)
+
+# Register functions from auth_router
+app.include_router(agent_router)
+app.include_router(auth_router.router)
 
 # To run this server:
 # 1. Make sure you are in the root directory of the project (Cook.ai).
